@@ -40,6 +40,137 @@
     const on = (type, cb) => ((handlers[type] = handlers[type] || []).push(cb), undefined);
     const emit = (type, msg) => (handlers[type] || []).forEach((cb) => cb(msg));
 
+    // ── Theme accent chooser ─────────────────────────────────────────────
+    // The four site themes (mint / amber / sky / paper) plus extras. The pick
+    // is persisted and overrides the shape's own default accent. Lives in the
+    // header so every shape gets it for free.
+    const THEME_KEY = "crewhaus-ui-accent";
+    const THEMES = [
+      { name: "Mint", hex: "#2ECC8B" }, // site default
+      { name: "Emerald", hex: "#5CD6A8" },
+      { name: "Teal", hex: "#2BC4B4" },
+      { name: "Sky", hex: "#64B5FF" }, // site blue
+      { name: "Indigo", hex: "#5B8CFF" },
+      { name: "Violet", hex: "#B08CFF" },
+      { name: "Pink", hex: "#FF6FB5" },
+      { name: "Coral", hex: "#FF7A5B" },
+      { name: "Orange", hex: "#F6821F" },
+      { name: "Amber", hex: "#E6B450" }, // site amber
+      { name: "Lime", hex: "#9BD64A" },
+      { name: "Paper", hex: "#E8EFE9" }, // site white
+    ];
+    function hexA(hex, a) {
+      const h = hex.replace("#", "");
+      const n = parseInt(h.length === 3 ? h.replace(/(.)/g, "$1$1") : h, 16);
+      return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${a})`;
+    }
+    function darken(hex, f) {
+      const h = hex.replace("#", "");
+      const n = parseInt(h.length === 3 ? h.replace(/(.)/g, "$1$1") : h, 16);
+      const d = (c) => Math.max(0, Math.round(c * (1 - f)));
+      const v = (d((n >> 16) & 255) << 16) | (d((n >> 8) & 255) << 8) | d(n & 255);
+      return `#${v.toString(16).padStart(6, "0")}`;
+    }
+    function toHex(hex) {
+      if (/^#[0-9a-fA-F]{6}$/.test(hex)) return hex.toLowerCase();
+      if (/^#[0-9a-fA-F]{3}$/.test(hex))
+        return `#${hex.slice(1).replace(/(.)/g, "$1$1").toLowerCase()}`;
+      return "#2ecc8b";
+    }
+    function readSaved() {
+      try {
+        return localStorage.getItem(THEME_KEY);
+      } catch {
+        return null;
+      }
+    }
+
+    const accentDot = el("span", { class: "accent-dot" });
+    const paletteBtn = el(
+      "button",
+      { class: "btn ghost sm icon-only", title: "Theme color", "aria-label": "Theme color" },
+      accentDot,
+    );
+    const swatchGrid = el("div", { class: "swatch-grid" });
+    const swatchNodes = [];
+    for (const t of THEMES) {
+      const sw = el("button", {
+        class: "swatch",
+        title: t.name,
+        style: { background: t.hex },
+        dataset: { hex: t.hex },
+        onClick: () => chooseAccent(t.hex),
+      });
+      swatchNodes.push(sw);
+      swatchGrid.appendChild(sw);
+    }
+    const customInput = el("input", {
+      type: "color",
+      class: "swatch-custom",
+      title: "Custom color",
+      value: "#2ecc8b",
+      onInput: (e) => chooseAccent(e.target.value),
+    });
+    const resetBtn = el(
+      "button",
+      {
+        class: "btn ghost sm",
+        onClick: () => {
+          try {
+            localStorage.removeItem(THEME_KEY);
+          } catch {}
+          applyAccent(config.accent || "#2ECC8B");
+        },
+      },
+      "Shape default",
+    );
+    const palettePop = el("div", { class: "palette-pop", style: { display: "none" } }, [
+      el("div", { class: "palette-title", text: "Theme color" }),
+      swatchGrid,
+      el("div", { class: "palette-row" }, [customInput, resetBtn]),
+    ]);
+    document.body.appendChild(palettePop);
+
+    function markActive(hex) {
+      const want = toHex(hex);
+      swatchNodes.forEach((s) => s.classList.toggle("active", toHex(s.dataset.hex) === want));
+      customInput.value = want;
+    }
+    function applyAccent(hex) {
+      const s = document.documentElement.style;
+      s.setProperty("--accent", hex);
+      s.setProperty("--accent-2", darken(hex, 0.14));
+      s.setProperty("--accent-ghost", hexA(hex, 0.1));
+      s.setProperty("--accent-glow", hexA(hex, 0.2));
+      accentDot.style.background = hex;
+      markActive(hex);
+    }
+    function chooseAccent(hex) {
+      try {
+        localStorage.setItem(THEME_KEY, hex);
+      } catch {}
+      applyAccent(hex);
+    }
+    function togglePalette() {
+      palettePop.style.display = palettePop.style.display === "none" ? "block" : "none";
+    }
+    paletteBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      togglePalette();
+    });
+    document.addEventListener("click", (e) => {
+      if (e.target !== paletteBtn && !paletteBtn.contains(e.target) && !palettePop.contains(e.target))
+        palettePop.style.display = "none";
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") palettePop.style.display = "none";
+    });
+    // Apply a saved pick immediately (pre-paint) to avoid an accent flash.
+    {
+      const s0 = readSaved();
+      if (s0) applyAccent(s0);
+    }
+
     // ── Header ───────────────────────────────────────────────────────────
     const statusEl = el("div", { class: "status", dataset: { state: "offline" } });
     setStatus(statusEl, "offline");
@@ -78,6 +209,7 @@
       el("div", { class: "header-spacer" }),
       actions,
       statusEl,
+      paletteBtn,
       logBtn,
     ]);
 
@@ -145,17 +277,8 @@
       titleEl.textContent = config.title || "CrewHaus";
       shapeTag.textContent = config.shape || "";
       taglineEl.textContent = config.tagline || "";
-      if (config.accent) {
-        document.documentElement.style.setProperty("--accent", config.accent);
-        document.documentElement.style.setProperty("--accent-2", config.accent);
-        document.documentElement.style.setProperty("--accent-ghost", hexA(config.accent, 0.1));
-        document.documentElement.style.setProperty("--accent-glow", hexA(config.accent, 0.2));
-      }
-    }
-    function hexA(hex, a) {
-      const h = hex.replace("#", "");
-      const n = parseInt(h.length === 3 ? h.replace(/(.)/g, "$1$1") : h, 16);
-      return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${a})`;
+      // A saved theme pick wins; otherwise fall back to the shape's default.
+      applyAccent(readSaved() || config.accent || "#2ECC8B");
     }
 
     function refreshControls() {
