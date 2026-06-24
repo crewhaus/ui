@@ -1,6 +1,6 @@
 {
   "name": "@crewhaus/ui",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Drop-in web UIs for every CrewHaus harness shape, plus a one-command scaffolder. Compile a spec, point @crewhaus/ui at it, get a polished shape-aware UI in the browser.",
   "type": "module",
   "license": "Apache-2.0",
@@ -31,7 +31,7 @@
     "./package.json": "./package.json"
   },
   "bin": {
-    "crewhaus-ui": "./bin/cli.ts"
+    "crewhaus-ui": "bin/cli.ts"
   },
   "engines": {
     "bun": ">=1.2"
