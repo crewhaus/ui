@@ -1,9 +1,19 @@
 # ── Dropped-in compiled harnesses ────────────────────────────────────────────
 # Each shape's harness/ folder is where a user drops their compiled bundle.
 # Those artifacts are per-user and must not be committed — keep only the
-# placeholder that explains what goes there.
+# placeholder and the *.example secret templates.
 */harness/*
 !*/harness/DROP_COMPILED_FILES_HERE.md
+!*/harness/*.example
+
+# ── Secrets — never commit real values; only the .example templates ───────────
+# Provider keys / tokens / RPC URLs live in `.env` (or `.dev.vars` for the
+# cf-worker shapes). Templates end in `.example` and ARE committed.
+.env
+.env.local
+.dev.vars
+*/harness/.env
+*/harness/.dev.vars
 
 # ── Dependencies & lockfiles (generated when a harness is run) ────────────────
 node_modules/
@@ -13,14 +23,6 @@ bun.lockb
 package-lock.json
 yarn.lock
 pnpm-lock.yaml
-
-# ── Secrets ──────────────────────────────────────────────────────────────────
-# cf-worker shapes read ANTHROPIC_API_KEY (and friends) from harness/.dev.vars.
-# Never commit credentials.
-.dev.vars
-*.env
-.env
-.env.*
 
 # ── OS / editor cruft ────────────────────────────────────────────────────────
 .DS_Store

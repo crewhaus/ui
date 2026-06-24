@@ -25,8 +25,8 @@ Plus one secret file you create yourself:
 # (emitAs: "cf-worker") from a `target: cli` spec — it produces worker.js +
 # wrangler.toml + package.json. Copy those three files here:
 ```
-cp build/worker.js build/wrangler.toml build/package.json public/ui/cf-worker-cli/harness/
-printf 'ANTHROPIC_API_KEY=%s\n' "$ANTHROPIC_API_KEY" > public/ui/cf-worker-cli/harness/.dev.vars
+cp build/worker.js build/wrangler.toml build/package.json ui/cf-worker-cli/harness/
+printf 'ANTHROPIC_API_KEY=%s\n' "$ANTHROPIC_API_KEY" > ui/cf-worker-cli/harness/.dev.vars
 ```
 
 ## How to run
@@ -50,3 +50,9 @@ Request Console works the moment the page loads.
 - This target is **Anthropic-only** and **tools-free** (M0): the worker inlines a
   minimal `api.anthropic.com` streaming client and POSTs the baked-in model.
 - If a request 500s with `NO_KEY`, your `.dev.vars` is missing or unreadable.
+
+---
+
+**Secrets:** copy `.dev.vars.example` → `.dev.vars` in this folder and set `ANTHROPIC_API_KEY`
+(Cloudflare’s native local-secrets format — the same file `wrangler dev` reads). It is
+gitignored; the host loads it for the worker.

@@ -41,3 +41,9 @@ throughput, cache hits, retries and dead-lettered jobs as the events stream in.
 > `queue.seedJobs`. If your spec selects SQS / Redis Streams / Postgres the
 > worker boots and then exits with a clean "adapter not implemented" diagnostic
 > — visible in the worker log and the Raw output drawer.
+
+---
+
+**Secrets:** copy `.env.example` → `.env` in this folder and fill in your provider key
+(and any `${VAR}` your spec uses). The host loads it for the harness; `.env` is gitignored.
+A key in the repo-root `.env` covers every shape instead.

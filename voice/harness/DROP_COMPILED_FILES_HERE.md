@@ -23,7 +23,7 @@ The host picks `daemon.ts` as the entry (falling back to `agent.ts`).
 
 ## How to run
 
-From this shape directory (`public/ui/voice`):
+From this shape directory (`ui/voice`):
 
 ```
 bun ../serve.ts
@@ -46,3 +46,9 @@ are installed automatically on first run.
 
 > The full WebRTC + telephony bridge lands in a follow-up; v0 ships the headless
 > smoke path.
+
+---
+
+**Secrets:** copy `.env.example` → `.env` in this folder and fill in your provider key
+(and any `${VAR}` your spec uses). The host loads it for the harness; `.env` is gitignored.
+A key in the repo-root `.env` covers every shape instead.

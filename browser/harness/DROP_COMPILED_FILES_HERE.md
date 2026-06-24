@@ -43,3 +43,9 @@ first run.
 - Screenshots are captured for the *model* to see, not streamed to this UI — the
   host only observes that a Screenshot tool call happened and how large the result
   was. The UI shows a rich **action timeline** instead.
+
+---
+
+**Secrets:** copy `.env.example` → `.env` in this folder and fill in your provider key
+(and any `${VAR}` your spec uses). The host loads it for the harness; `.env` is gitignored.
+A key in the repo-root `.env` covers every shape instead.

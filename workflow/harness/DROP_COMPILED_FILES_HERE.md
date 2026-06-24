@@ -24,3 +24,9 @@ fed the previous step's output automatically.
 
 Each step streams into the live **step timeline**; the final step's text is
 rendered as the **result**.
+
+---
+
+**Secrets:** copy `.env.example` → `.env` in this folder and fill in your provider key
+(and any `${VAR}` your spec uses). The host loads it for the harness; `.env` is gitignored.
+A key in the repo-root `.env` covers every shape instead.

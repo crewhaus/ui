@@ -14,13 +14,13 @@ crewhaus compile crewhaus.yaml -o build
 
 # copy the emitted crew files here (the whole build/ dir is fine)
 cp build/daemon.ts build/orchestrator.ts build/agent_*.ts \
-   /path/to/public/ui/crew/harness/
+   /path/to/ui/crew/harness/
 ```
 
 Then start the UI:
 
 ```bash
-bun ../serve.ts      # or: bun public/ui/crew/serve.ts
+bun ../serve.ts      # or: bun ui/crew/serve.ts
 ```
 
 Open the printed URL, type a task, and press **Run**. The UI installs the
@@ -30,3 +30,9 @@ another, and shows the final answer.
 
 `daemon.ts` is the required entry; it imports `orchestrator.ts` and every
 `agent_<role>.ts`, so keep them all together in this folder.
+
+---
+
+**Secrets:** copy `.env.example` → `.env` in this folder and fill in your provider key
+(and any `${VAR}` your spec uses). The host loads it for the harness; `.env` is gitignored.
+A key in the repo-root `.env` covers every shape instead.

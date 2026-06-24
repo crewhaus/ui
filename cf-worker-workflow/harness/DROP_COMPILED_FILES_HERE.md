@@ -27,8 +27,8 @@ Plus one secret file you create yourself:
 # (emitAs: "cf-worker") from a `target: workflow` spec — it produces worker.js +
 # wrangler.toml + package.json. Copy those three files here:
 ```
-cp build/worker.js build/wrangler.toml build/package.json public/ui/cf-worker-workflow/harness/
-printf 'ANTHROPIC_API_KEY=%s\n' "$ANTHROPIC_API_KEY" > public/ui/cf-worker-workflow/harness/.dev.vars
+cp build/worker.js build/wrangler.toml build/package.json ui/cf-worker-workflow/harness/
+printf 'ANTHROPIC_API_KEY=%s\n' "$ANTHROPIC_API_KEY" > ui/cf-worker-workflow/harness/.dev.vars
 ```
 
 ## How to run
@@ -63,3 +63,9 @@ Request Console and Step Timeline work the moment the page loads.
   model. Steps with tools or non-Anthropic models are rejected at compile time —
   use the local `workflow` target for those.
 - If a request 500s with `NO_KEY`, your `.dev.vars` is missing or unreadable.
+
+---
+
+**Secrets:** copy `.dev.vars.example` → `.dev.vars` in this folder and set `ANTHROPIC_API_KEY`
+(Cloudflare’s native local-secrets format — the same file `wrangler dev` reads). It is
+gitignored; the host loads it for the worker.

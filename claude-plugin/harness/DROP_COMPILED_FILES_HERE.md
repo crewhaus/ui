@@ -44,3 +44,8 @@ Open the printed URL. There are **no Start/Stop controls** — plugin bundles ar
 inspected, never run. The inspector shows the manifest, what the plugin
 provides (skills, sub-agents, commands), its MCP servers, the rendered README,
 and copy-paste install instructions for Claude Code.
+
+---
+
+**Secrets:** none. The inspector only reads the plugin's manifest files — nothing is
+executed, so no provider key or `.env` is needed here.

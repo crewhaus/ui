@@ -39,3 +39,9 @@ The loop signs and broadcasts real transactions, so it expects:
 Set those in your shell before `bun ../serve.ts`. The loop's turn semantics
 (`turn-based`, `real-time`, or `async`) and stop condition (objective met or move
 ceiling reached) are baked into the bundle.
+
+---
+
+**Secrets:** copy `.env.example` → `.env` in this folder and fill in your provider key
+(and any `${VAR}` your spec uses). The host loads it for the harness; `.env` is gitignored.
+A key in the repo-root `.env` covers every shape instead.

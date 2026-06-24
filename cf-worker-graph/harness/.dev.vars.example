@@ -1,0 +1,5 @@
+# Cloudflare Worker local secrets for the `cf-worker-graph` harness (wrangler `.dev.vars` format).
+# Copy this file to `.dev.vars` in THIS folder (gitignored); the host loads it for the worker.
+# In production set these with `wrangler secret put <NAME>`.
+
+ANTHROPIC_API_KEY=sk-ant-xxxxxxxx

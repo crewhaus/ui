@@ -17,12 +17,12 @@ the `Source` / `CiteFact` tools, and assembles a cited markdown report under
 
 ```
 crewhaus compile crewhaus.yaml -o build
-cp build/agent.ts public/ui/research/harness/agent.ts
+cp build/agent.ts ui/research/harness/agent.ts
 ```
 
 ## How to run
 
-From `public/ui/research/`:
+From `ui/research/`:
 
 ```
 bun serve.ts
@@ -36,3 +36,9 @@ first run — no `bun install` needed.
 > plan, branches, sources and final report, then exits. Press **Run** again to
 > start a new investigation. The compiled agent also supports `--resume <runId>`
 > and `--branching <n>` if you invoke it directly from a shell.
+
+---
+
+**Secrets:** copy `.env.example` → `.env` in this folder and fill in your provider key
+(and any `${VAR}` your spec uses). The host loads it for the harness; `.env` is gitignored.
+A key in the repo-root `.env` covers every shape instead.
