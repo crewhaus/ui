@@ -51,3 +51,9 @@ Open the printed URL and press **Run eval**. The bundle runs every case,
 grades it, and the score board + per-case verdicts fill in live. Per-sample
 artifacts (`grades.json`, `events.jsonl`, `transcript.jsonl`) and the run
 summary (`results.json`) are written under `.crewhaus/evals/<runId>/`.
+
+---
+
+**Secrets:** copy `.env.example` → `.env` in this folder and fill in your provider key
+(and any `${VAR}` your spec uses). The host loads it for the harness; `.env` is gitignored.
+A key in the repo-root `.env` covers every shape instead.

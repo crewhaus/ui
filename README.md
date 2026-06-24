@@ -41,11 +41,35 @@ That's it. Open the URL and press **Start** (or **Run**).
 ## Requirements
 
 - [Bun](https://bun.sh) ≥ 1.2 (the same runtime CrewHaus bundles use).
-- A provider credential for the agent to actually think, e.g. `export ANTHROPIC_API_KEY=…`
-  (set it in the shell before `serve.ts`; it is passed through to the bundle).
+- A provider credential for the agent to actually think, e.g. `ANTHROPIC_API_KEY`
+  — see [Secrets & environment](#secrets--environment) below.
 
 The first run installs the bundle's npm dependencies (`@crewhaus/*`, all public)
 automatically — subsequent runs are instant.
+
+## Secrets & environment
+
+Agents need credentials (a provider key, maybe channel tokens or an RPC URL).
+**These live in `.env` files that are never committed** — every folder that needs
+one ships a `*.example` template. Copy it, drop in real values, and the host
+loads it for you:
+
+```bash
+cp .env.example .env            # repo-root: applies to ALL shapes (best for a shared key)
+# …or per shape:
+cp cli/harness/.env.example cli/harness/.env
+# …cf-worker shapes use Cloudflare's native format:
+cp cf-worker-cli/harness/.dev.vars.example cf-worker-cli/harness/.dev.vars
+```
+
+The host loads `.env` in increasing precedence: **repo-root → `<shape>/` →
+`<shape>/harness/`**, and an exported shell variable overrides them all. So a
+single `ANTHROPIC_API_KEY` in the root `.env` covers every shape, and a
+`<shape>/harness/.env` can override it per shape. cf-worker shapes read
+`<shape>/harness/.dev.vars` (the same file `wrangler dev` uses).
+
+`.gitignore` keeps real `.env` / `.dev.vars` files out of git; only the
+`.example` templates are tracked.
 
 ## How it works
 
@@ -75,13 +99,16 @@ and `textContent`, so a harness can never inject markup into the page.
 ## Configuration
 
 - `CREWHAUS_UI_PORT` — change the UI port (default `4100`).
-- Any provider/runtime env you export (`ANTHROPIC_API_KEY`, `CREWHAUS_SANDBOX`,
-  `PORT` for daemons is managed automatically, …) is forwarded to the harness.
+- `CREWHAUS_SANDBOX=noop` — disable the code-exec sandbox floor.
+- Anything in a `.env` (or an exported var) is forwarded to the harness; `PORT`
+  for daemon shapes is assigned automatically. See
+  [Secrets & environment](#secrets--environment).
 
 ## Folder layout
 
 ```
 ui/
+  .env.example    copy to .env — a shared key/config for every shape
   _shared/        host.ts, ui.css, ui.js, events.js, app-kit.js   (the engine)
   <shape>/
     config.json   how this shape is run + which panels to show
@@ -89,4 +116,6 @@ ui/
     serve.ts      `serve(import.meta.dir)` — run this
     app.js        the shape's tailored interface
     harness/      <-- drop your compiled bundle here
+      .env.example          copy to .env for per-shape secrets
+                            (cf-worker shapes: .dev.vars.example -> .dev.vars)
 ```

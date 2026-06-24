@@ -17,7 +17,7 @@ crewhaus compile crewhaus.yaml -o build
 
 # 2. Copy the emitted files into this folder
 cp build/daemon.ts build/agent.ts build/session-router.ts build/gateway.ts \
-   public/ui/channel/harness/
+   ui/channel/harness/
 
 # 3. Export the secrets your channels + model need, then run the UI
 export ANTHROPIC_API_KEY=…          # or your configured provider's key
@@ -49,3 +49,9 @@ public on npm) install automatically on first run.
 > (set when your spec has a `gateway:` block). The host proxies the main webhook
 > port, so when `/status` isn't reachable through the proxy the dashboard falls
 > back to the daemon's log lines — which carry the same state.
+
+---
+
+**Secrets:** copy `.env.example` → `.env` in this folder and fill in your provider key
+(and any `${VAR}` your spec uses). The host loads it for the harness; `.env` is gitignored.
+A key in the repo-root `.env` covers every shape instead.

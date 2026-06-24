@@ -47,3 +47,9 @@ resume command. You can resume or time-travel from the shell:
 bun agent.ts --resume <graphRunId> <decision>
 bun agent.ts --branch-from <graphRunId> <checkpointId>
 ```
+
+---
+
+**Secrets:** copy `.env.example` → `.env` in this folder and fill in your provider key
+(and any `${VAR}` your spec uses). The host loads it for the harness; `.env` is gitignored.
+A key in the repo-root `.env` covers every shape instead.

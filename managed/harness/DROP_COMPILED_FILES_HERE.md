@@ -17,13 +17,13 @@ folder. The `managed` target emits two files — drop **both**:
 ```sh
 crewhaus compile crewhaus.yaml -o build      # spec must use target: managed
 cp build/daemon.ts build/agent.ts \
-   public/ui/managed/harness/
+   ui/managed/harness/
 ```
 
 ## Run it
 
 ```sh
-bun ../serve.ts        # from this directory's parent (public/ui/managed)
+bun ../serve.ts        # from this directory's parent (ui/managed)
 ```
 
 Then open the printed URL and click **Start**. Dependencies (`@crewhaus/*` from
@@ -48,3 +48,9 @@ before running:
 ```sh
 export CREWHAUS_GATEWAY_JWT_SECRET=<a-secret-at-least-16-chars>
 ```
+
+---
+
+**Secrets:** copy `.env.example` → `.env` in this folder and fill in your provider key
+(and any `${VAR}` your spec uses). The host loads it for the harness; `.env` is gitignored.
+A key in the repo-root `.env` covers every shape instead.

@@ -16,7 +16,7 @@ documents declared in your spec's `indexing.documents`, registers the
 
 ```
 crewhaus compile crewhaus.yaml -o build
-cp build/agent.ts /Users/bots/Developer/CrewHaus/public/ui/pipeline/harness/agent.ts
+cp build/agent.ts ui/pipeline/harness/agent.ts
 ```
 
 ## How to run
@@ -41,3 +41,9 @@ streams back a cited answer, then exits. Ask another question to run again.
 - Retrieval calls appear as cards in the **Retrieved sources** panel.
 - Inline `[1]`, `[2]` citation markers in the answer are cross-referenced in
   the same panel.
+
+---
+
+**Secrets:** copy `.env.example` → `.env` in this folder and fill in your provider key
+(and any `${VAR}` your spec uses). The host loads it for the harness; `.env` is gitignored.
+A key in the repo-root `.env` covers every shape instead.

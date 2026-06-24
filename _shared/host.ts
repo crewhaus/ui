@@ -2,7 +2,7 @@
 /**
  * CrewHaus Shape UI — universal host.
  *
- * One config-driven Bun server that powers every shape UI under `public/ui/`.
+ * One config-driven Bun server that powers every shape UI under `ui/`.
  * A shape directory ships an `index.html`, an `app.js`, and a `config.json`;
  * its `serve.ts` is a one-liner that calls `serve(import.meta.dir)`.
  *
@@ -73,6 +73,44 @@ const MIME: Record<string, string> = {
 function mimeFor(path: string): string {
   const dot = path.lastIndexOf(".");
   return MIME[path.slice(dot)] ?? "application/octet-stream";
+}
+
+// -- Env files ----------------------------------------------------------------
+//
+// Secrets (provider keys, channel tokens, RPC URLs, …) are supplied via `.env`
+// files that are NEVER committed. They are loaded, in increasing precedence,
+// from the repo root, the shape dir, then the shape's `harness/`, and merged
+// UNDER the real process env (an exported var always wins). cf-worker shapes
+// additionally read `harness/.dev.vars` (Cloudflare's native format).
+
+/** Parse a dotenv-style KEY=VALUE file. Blank lines and `#` comments ignored. */
+function parseEnvFile(path: string): Record<string, string> {
+  if (!existsSync(path)) return {};
+  const out: Record<string, string> = {};
+  for (const raw of readFileSync(path, "utf8").split("\n")) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+    const eq = line.indexOf("=");
+    if (eq <= 0) continue;
+    let val = line.slice(eq + 1).trim();
+    if (
+      (val.startsWith('"') && val.endsWith('"')) ||
+      (val.startsWith("'") && val.endsWith("'"))
+    ) {
+      val = val.slice(1, -1);
+    }
+    out[line.slice(0, eq).trim()] = val;
+  }
+  return out;
+}
+
+/** Merge .env files for a shape: repo-root < shape < harness (later wins). */
+function loadEnvChain(shapeDir: string): Record<string, string> {
+  return {
+    ...parseEnvFile(join(shapeDir, "..", ".env")),
+    ...parseEnvFile(join(shapeDir, ".env")),
+    ...parseEnvFile(join(shapeDir, "harness", ".env")),
+  };
 }
 
 // -- Harness detection --------------------------------------------------------
@@ -415,6 +453,7 @@ class Supervisor {
     this.setState("starting");
 
     const env: Record<string, string> = {
+      ...loadEnvChain(this.dir),
       ...process.env,
       CREWHAUS_TRACE: "json",
       CREWHAUS_COST_TRACKING: "1",
@@ -530,14 +569,13 @@ async function runWorker(
   const mod = await import(`${workerPath}?t=${Date.now()}`);
   const handler = mod.default;
   if (!handler?.fetch) return new Response("worker has no default fetch export", { status: 500 });
-  const env: Record<string, string> = { ...process.env } as Record<string, string>;
-  const devVars = join(harnessDir, ".dev.vars");
-  if (existsSync(devVars)) {
-    for (const line of readFileSync(devVars, "utf8").split("\n")) {
-      const eq = line.indexOf("=");
-      if (eq > 0 && !line.startsWith("#")) env[line.slice(0, eq).trim()] = line.slice(eq + 1).trim();
-    }
-  }
+  // Worker env: .env chain (root/shape/harness) < process.env < .dev.vars
+  // (.dev.vars is Cloudflare's native local-secrets file and wins).
+  const env: Record<string, string> = {
+    ...loadEnvChain(dirname(harnessDir)),
+    ...(process.env as Record<string, string>),
+    ...parseEnvFile(join(harnessDir, ".dev.vars")),
+  };
   const url = new URL(req.url);
   const body =
     req.method === "GET" || req.method === "HEAD" ? undefined : await req.arrayBuffer();
