@@ -1,0 +1,11 @@
+{
+  "shape": "onchain",
+  "title": "On-chain Agent",
+  "tagline": "An event-driven EVM agent",
+  "runClass": "stdio-interactive",
+  "entry": ["agent.ts"],
+  "input": "none",
+  "icon": "link",
+  "accent": "#E8B339",
+  "features": ["chain", "contracts", "tx", "wallet"]
+}

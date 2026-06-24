@@ -1,0 +1,11 @@
+{
+  "shape": "cf-worker-graph",
+  "title": "CF Worker · Graph",
+  "tagline": "A graph runtime at the edge",
+  "runClass": "cf-worker",
+  "entry": ["worker.js"],
+  "input": "none",
+  "icon": "cloud",
+  "accent": "#F6821F",
+  "features": ["sse", "graph", "edge"]
+}

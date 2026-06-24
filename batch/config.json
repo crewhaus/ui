@@ -1,0 +1,11 @@
+{
+  "shape": "batch",
+  "title": "Batch Worker",
+  "tagline": "A queue-draining job worker",
+  "runClass": "stdio-oneshot",
+  "entry": ["agent.ts"],
+  "input": "none",
+  "icon": "package",
+  "accent": "#6FD08C",
+  "features": ["queue", "jobs", "throughput"]
+}

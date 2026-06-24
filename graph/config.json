@@ -1,0 +1,11 @@
+{
+  "shape": "graph",
+  "title": "Graph Runtime",
+  "tagline": "A stateful DAG of LLM nodes",
+  "runClass": "stdio-oneshot",
+  "entry": ["agent.ts"],
+  "input": "oneshot",
+  "icon": "git",
+  "accent": "#B08CFF",
+  "features": ["nodes", "state", "edges", "run"]
+}

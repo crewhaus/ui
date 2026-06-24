@@ -1,0 +1,11 @@
+{
+  "shape": "research",
+  "title": "Research Agent",
+  "tagline": "Autonomous, multi-branch, cited research",
+  "runClass": "stdio-oneshot",
+  "entry": ["agent.ts"],
+  "input": "oneshot",
+  "icon": "search",
+  "accent": "#C792EA",
+  "features": ["branches", "citations", "report", "sources"]
+}

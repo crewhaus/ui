@@ -1,0 +1,11 @@
+{
+  "shape": "pipeline",
+  "title": "RAG Pipeline",
+  "tagline": "Retrieval-augmented answers with citations",
+  "runClass": "stdio-oneshot",
+  "entry": ["agent.ts"],
+  "input": "oneshot",
+  "icon": "database",
+  "accent": "#4FB6E0",
+  "features": ["retrieve", "citations", "rag", "index"]
+}

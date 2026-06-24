@@ -1,0 +1,32 @@
+# ── Dropped-in compiled harnesses ────────────────────────────────────────────
+# Each shape's harness/ folder is where a user drops their compiled bundle.
+# Those artifacts are per-user and must not be committed — keep only the
+# placeholder that explains what goes there.
+*/harness/*
+!*/harness/DROP_COMPILED_FILES_HERE.md
+
+# ── Dependencies & lockfiles (generated when a harness is run) ────────────────
+node_modules/
+.bun/
+bun.lock
+bun.lockb
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# ── Secrets ──────────────────────────────────────────────────────────────────
+# cf-worker shapes read ANTHROPIC_API_KEY (and friends) from harness/.dev.vars.
+# Never commit credentials.
+.dev.vars
+*.env
+.env
+.env.*
+
+# ── OS / editor cruft ────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.idea/
+.vscode/
+*.log

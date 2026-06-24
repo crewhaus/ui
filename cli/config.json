@@ -1,0 +1,11 @@
+{
+  "shape": "cli",
+  "title": "CLI Agent",
+  "tagline": "A self-contained terminal agent, in your browser",
+  "runClass": "stdio-interactive",
+  "entry": ["agent.ts"],
+  "input": "interactive",
+  "icon": "terminal",
+  "accent": "#2ecc8b",
+  "features": ["chat", "tools", "subagents", "mcp", "permissions", "cost", "skills"]
+}

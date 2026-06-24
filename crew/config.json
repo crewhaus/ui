@@ -1,0 +1,11 @@
+{
+  "shape": "crew",
+  "title": "Agent Crew",
+  "tagline": "A multi-role crew that hands off work",
+  "runClass": "stdio-oneshot",
+  "entry": ["daemon.ts"],
+  "input": "oneshot",
+  "icon": "layers",
+  "accent": "#F2A65A",
+  "features": ["roles", "handoffs", "routing"]
+}

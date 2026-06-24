@@ -1,0 +1,12 @@
+{
+  "shape": "managed",
+  "title": "Managed Runtime",
+  "tagline": "A multi-tenant agent gateway",
+  "runClass": "daemon-http",
+  "entry": ["daemon.ts"],
+  "input": "none",
+  "port": 3000,
+  "icon": "cloud",
+  "accent": "#8FA3FF",
+  "features": ["tenants", "gateway", "requests", "health"]
+}

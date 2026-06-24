@@ -1,0 +1,11 @@
+{
+  "shape": "workflow",
+  "title": "Workflow Runtime",
+  "tagline": "Deterministic multi-step orchestration",
+  "runClass": "stdio-oneshot",
+  "entry": ["agent.ts"],
+  "input": "oneshot",
+  "icon": "workflow",
+  "accent": "#2BC4B4",
+  "features": ["steps", "orchestration", "run"]
+}

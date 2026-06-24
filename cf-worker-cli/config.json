@@ -1,0 +1,11 @@
+{
+  "shape": "cf-worker-cli",
+  "title": "CF Worker · CLI",
+  "tagline": "A Cloudflare Worker agent endpoint",
+  "runClass": "cf-worker",
+  "entry": ["worker.js"],
+  "input": "none",
+  "icon": "cloud",
+  "accent": "#F6821F",
+  "features": ["sse", "request", "edge"]
+}

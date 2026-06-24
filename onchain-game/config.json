@@ -1,0 +1,11 @@
+{
+  "shape": "onchain-game",
+  "title": "On-chain Game",
+  "tagline": "A perceive-act game loop on-chain",
+  "runClass": "stdio-interactive",
+  "entry": ["agent.ts"],
+  "input": "none",
+  "icon": "gamepad",
+  "accent": "#FF8A5B",
+  "features": ["game", "loop", "state", "actions"]
+}

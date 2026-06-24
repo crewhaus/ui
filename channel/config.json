@@ -1,0 +1,12 @@
+{
+  "shape": "channel",
+  "title": "Channel Bot",
+  "tagline": "One agent, every chat platform",
+  "runClass": "daemon-http",
+  "entry": ["daemon.ts"],
+  "input": "none",
+  "port": 3000,
+  "icon": "message",
+  "accent": "#5B8CFF",
+  "features": ["channels", "webhooks", "status", "sessions", "heartbeat", "activity"]
+}

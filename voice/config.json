@@ -1,0 +1,11 @@
+{
+  "shape": "voice",
+  "title": "Voice Agent",
+  "tagline": "A realtime voice/turn agent",
+  "runClass": "stdio-interactive",
+  "entry": ["daemon.ts", "agent.ts"],
+  "input": "interactive",
+  "icon": "mic",
+  "accent": "#FF6FB5",
+  "features": ["transcript", "turns", "voice"]
+}

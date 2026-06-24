@@ -1,0 +1,11 @@
+{
+  "shape": "cf-worker-workflow",
+  "title": "CF Worker · Workflow",
+  "tagline": "A workflow runtime at the edge",
+  "runClass": "cf-worker",
+  "entry": ["worker.js"],
+  "input": "none",
+  "icon": "cloud",
+  "accent": "#F6821F",
+  "features": ["sse", "workflow", "edge"]
+}

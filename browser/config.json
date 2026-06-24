@@ -1,0 +1,11 @@
+{
+  "shape": "browser",
+  "title": "Browser Agent",
+  "tagline": "A computer-use agent that drives a browser",
+  "runClass": "stdio-oneshot",
+  "entry": ["agent.ts"],
+  "input": "oneshot",
+  "icon": "globe",
+  "accent": "#74C0FC",
+  "features": ["actions", "screenshots", "viewport"]
+}

@@ -1,0 +1,11 @@
+{
+  "shape": "eval",
+  "title": "Eval Bundle",
+  "tagline": "Grade a target against a labeled dataset",
+  "runClass": "stdio-oneshot",
+  "entry": ["agent.ts"],
+  "input": "none",
+  "icon": "flask",
+  "accent": "#5CD6A8",
+  "features": ["dataset", "verdicts", "grader", "report", "score"]
+}

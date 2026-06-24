@@ -1,0 +1,11 @@
+{
+  "shape": "claude-plugin",
+  "title": "Claude Plugin",
+  "tagline": "Inspect & install a compiled Claude Code plugin",
+  "runClass": "plugin",
+  "entry": [".claude-plugin/plugin.json"],
+  "input": "none",
+  "icon": "plug",
+  "accent": "#D97757",
+  "features": ["manifest", "mcp", "commands", "install"]
+}
