@@ -1,0 +1,53 @@
+{
+  "name": "@crewhaus/ui",
+  "version": "0.1.0",
+  "description": "Drop-in web UIs for every CrewHaus harness shape, plus a one-command scaffolder. Compile a spec, point @crewhaus/ui at it, get a polished shape-aware UI in the browser.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "author": "CrewHaus",
+  "homepage": "https://github.com/crewhaus/ui#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/crewhaus/ui.git"
+  },
+  "bugs": {
+    "url": "https://github.com/crewhaus/ui/issues"
+  },
+  "keywords": [
+    "crewhaus",
+    "ai",
+    "agent",
+    "agents",
+    "ui",
+    "harness",
+    "llm",
+    "bun"
+  ],
+  "main": "./src/index.ts",
+  "module": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./host": "./_shared/host.ts",
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "crewhaus-ui": "./bin/cli.ts"
+  },
+  "engines": {
+    "bun": ">=1.2"
+  },
+  "files": [
+    "_shared",
+    "src",
+    "bin",
+    "*/config.json",
+    "*/index.html",
+    "*/app.js",
+    "README.md",
+    "LICENSE",
+    ".env.example"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}

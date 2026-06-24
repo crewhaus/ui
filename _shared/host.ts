@@ -104,12 +104,14 @@ function parseEnvFile(path: string): Record<string, string> {
   return out;
 }
 
-/** Merge .env files for a shape: repo-root < shape < harness (later wins). */
-function loadEnvChain(shapeDir: string): Record<string, string> {
+/** Merge .env files: cwd < harness-parent < harness (later wins). Covers both
+ *  the in-repo layout (harness lives under the shape dir) and the npm-package
+ *  layout (harness is the user's project dir). */
+function loadEnvChain(harnessDir: string): Record<string, string> {
   return {
-    ...parseEnvFile(join(shapeDir, "..", ".env")),
-    ...parseEnvFile(join(shapeDir, ".env")),
-    ...parseEnvFile(join(shapeDir, "harness", ".env")),
+    ...parseEnvFile(join(process.cwd(), ".env")),
+    ...parseEnvFile(join(harnessDir, "..", ".env")),
+    ...parseEnvFile(join(harnessDir, ".env")),
   };
 }
 
@@ -141,8 +143,7 @@ function listHarnessFiles(harnessDir: string): string[] {
   return out.sort();
 }
 
-function detectHarness(dir: string, config: ShapeConfig): HarnessState {
-  const harnessDir = join(dir, "harness");
+function detectHarness(harnessDir: string, config: ShapeConfig): HarnessState {
   const files = listHarnessFiles(harnessDir);
   const present = files.filter((f) => !/README|DROP_/i.test(f)).length > 0;
   let entry: string | null = null;
@@ -369,21 +370,17 @@ class Supervisor {
   daemonPort: number | null = null;
 
   constructor(
-    private dir: string,
+    readonly harnessDir: string,
     private config: ShapeConfig,
     private broadcast: Broadcast,
   ) {}
-
-  get harnessDir(): string {
-    return join(this.dir, "harness");
-  }
 
   snapshot() {
     return {
       state: this.state,
       running: this.proc !== null,
       daemonPort: this.daemonPort,
-      harness: detectHarness(this.dir, this.config),
+      harness: detectHarness(this.harnessDir, this.config),
     };
   }
 
@@ -421,7 +418,7 @@ class Supervisor {
   }
 
   private async install(): Promise<boolean> {
-    const h = detectHarness(this.dir, this.config);
+    const h = detectHarness(this.harnessDir, this.config);
     if (!h.present) {
       this.log("No compiled harness found in harness/. Drop your files there first.");
       return false;
@@ -439,7 +436,7 @@ class Supervisor {
       this.log("Plugin shapes are inspected, not run.");
       return;
     }
-    const h = detectHarness(this.dir, this.config);
+    const h = detectHarness(this.harnessDir, this.config);
     if (!h.entry) {
       this.setState("error", "no entry file in harness/");
       this.log(`No entry file (${this.config.entry.join(" / ")}) found in harness/.`);
@@ -453,7 +450,7 @@ class Supervisor {
     this.setState("starting");
 
     const env: Record<string, string> = {
-      ...loadEnvChain(this.dir),
+      ...loadEnvChain(this.harnessDir),
       ...process.env,
       CREWHAUS_TRACE: "json",
       CREWHAUS_COST_TRACKING: "1",
@@ -592,9 +589,57 @@ async function runWorker(
 
 const WS_CLIENTS = new Set<{ send: (s: string) => void }>();
 
-export function serve(dir: string): void {
-  const config = readConfig(dir);
-  const uiPort = Number(process.env.CREWHAUS_UI_PORT ?? 0) || 4100;
+/** Package root = the dir that holds `_shared/` and every `<shape>/`. */
+const PKG_ROOT = dirname(SHARED_DIR);
+
+export type ServeOptions = {
+  /** Shape name (e.g. "cli"). UI assets resolve to `<pkg>/<shape>`. */
+  shape?: string;
+  /** UI assets dir (config.json/index.html/app.js). Default: `<pkg>/<shape>`. */
+  uiDir?: string;
+  /** Where the user's compiled bundle lives. Default: `process.cwd()`. */
+  harnessDir?: string;
+  /** Override the `_shared` assets dir. Default: this package's `_shared`. */
+  sharedDir?: string;
+  /** Listen port. Default: `CREWHAUS_UI_PORT` env, else 4100. */
+  port?: number;
+};
+
+function resolveServe(opts: string | ServeOptions): {
+  uiDir: string;
+  harnessDir: string;
+  sharedDir: string;
+  port: number;
+} {
+  const envPort = Number(process.env.CREWHAUS_UI_PORT ?? 0) || 4100;
+  // Legacy / in-repo form: serve("<shapeDir>") with harness/ inside it.
+  if (typeof opts === "string") {
+    return {
+      uiDir: resolve(opts),
+      harnessDir: join(resolve(opts), "harness"),
+      sharedDir: SHARED_DIR,
+      port: envPort,
+    };
+  }
+  // Package form: serve({ shape, harnessDir }).
+  const uiDir = opts.uiDir ?? (opts.shape ? join(PKG_ROOT, opts.shape) : undefined);
+  if (!uiDir) throw new Error("serve(): pass a shape dir string, or { shape } / { uiDir }");
+  return {
+    uiDir: resolve(uiDir),
+    harnessDir: resolve(opts.harnessDir ?? process.cwd()),
+    sharedDir: opts.sharedDir ?? SHARED_DIR,
+    port: opts.port ?? envPort,
+  };
+}
+
+/**
+ * Serve a shape UI. Two forms:
+ *   serve("/abs/path/to/ui/cli")                    // in-repo (harness/ inside)
+ *   serve({ shape: "cli", harnessDir: "./build" })  // npm-package consumers
+ */
+export function serve(opts: string | ServeOptions): void {
+  const { uiDir, harnessDir, sharedDir, port } = resolveServe(opts);
+  const config = readConfig(uiDir);
 
   const broadcast: Broadcast = (msg) => {
     const s = JSON.stringify(msg);
@@ -607,7 +652,7 @@ export function serve(dir: string): void {
     }
   };
 
-  const sup = new Supervisor(dir, config, broadcast);
+  const sup = new Supervisor(harnessDir, config, broadcast);
 
   const staticFile = (path: string): Response | null => {
     if (!existsSync(path) || statSync(path).isDirectory()) return null;
@@ -615,7 +660,7 @@ export function serve(dir: string): void {
   };
 
   const server = Bun.serve({
-    port: uiPort,
+    port,
     idleTimeout: 0,
     async fetch(req, srv) {
       const url = new URL(req.url);
@@ -628,7 +673,7 @@ export function serve(dir: string): void {
 
       if (path === "/api/state") return Response.json({ config, ...sup.snapshot() });
       if (path === "/api/config") return Response.json(config);
-      if (path === "/api/harness") return Response.json(detectHarness(dir, config));
+      if (path === "/api/harness") return Response.json(detectHarness(harnessDir, config));
 
       // Reverse-proxy to the daemon (daemon-http shapes).
       if (path.startsWith("/proxy/")) {
@@ -650,20 +695,31 @@ export function serve(dir: string): void {
 
       // Invoke the Cloudflare worker directly (cf-worker shapes).
       if (path.startsWith("/worker/")) {
-        return runWorker(join(dir, "harness"), req, path.slice("/worker/".length));
+        return runWorker(harnessDir, req, path.slice("/worker/".length));
       }
 
-      // Static: shape files, then shared files.
+      // Read-only files from the user's harness dir (e.g. wrangler.toml,
+      // package.json for the cf-worker manifest panel). Secrets are never served.
+      if (path.startsWith("/harness/")) {
+        const rest = path.slice("/harness/".length);
+        if (rest.includes("..") || /(^|\/)\.(env|dev\.vars)/.test(rest))
+          return new Response("forbidden", { status: 403 });
+        const r = staticFile(join(harnessDir, rest));
+        if (r) return r;
+        return new Response("not found", { status: 404 });
+      }
+
+      // Static: shape assets, then shared assets.
       if (path === "/" || path === "/index.html") {
-        const r = staticFile(join(dir, "index.html"));
+        const r = staticFile(join(uiDir, "index.html"));
         if (r) return r;
       }
       if (path.startsWith("/_shared/")) {
-        const r = staticFile(join(SHARED_DIR, path.slice("/_shared/".length)));
+        const r = staticFile(join(sharedDir, path.slice("/_shared/".length)));
         if (r) return r;
       }
       {
-        const r = staticFile(join(dir, path.replace(/^\//, "")));
+        const r = staticFile(join(uiDir, path.replace(/^\//, "")));
         if (r) return r;
       }
       return new Response("not found", { status: 404 });
@@ -689,7 +745,7 @@ export function serve(dir: string): void {
   const ready =
     `\n  CrewHaus | ${config.title} UI\n` +
     `  > http://localhost:${server.port}\n` +
-    `  > drop a compiled ${config.shape} bundle into ${join(dir, "harness")}\n`;
+    `  > harness: ${harnessDir}\n`;
   process.stdout.write(ready);
 }
 
