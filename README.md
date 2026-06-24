@@ -9,8 +9,8 @@ runs it the way its shape expects.
 
 ```
 crewhaus compile crewhaus.yaml -o build      # compile your spec to a shape
-cp build/* public/ui/<shape>/harness/        # drop the compiled files in
-bun public/ui/<shape>/serve.ts               # run the UI  ->  http://localhost:4100
+cp build/* ui/<shape>/harness/               # drop the compiled files in
+bun ui/<shape>/serve.ts                      # run the UI  ->  http://localhost:4100
 ```
 
 That's it. Open the URL and press **Start** (or **Run**).
@@ -81,7 +81,7 @@ and `textContent`, so a harness can never inject markup into the page.
 ## Folder layout
 
 ```
-public/ui/
+ui/
   _shared/        host.ts, ui.css, ui.js, events.js, app-kit.js   (the engine)
   <shape>/
     config.json   how this shape is run + which panels to show
