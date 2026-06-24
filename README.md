@@ -1,11 +1,49 @@
-# CrewHaus Shape UIs
+# `@crewhaus/ui`
 
 A professional, modern web UI for **every CrewHaus harness shape**. Compile a
-spec to any target, drop the emitted files into the matching UI folder, run one
-command — and you get a polished, shape-aware interface for it in the browser.
+spec to any target, point `@crewhaus/ui` at it, and get a polished, shape-aware
+interface for it in the browser. No build step, no config.
 
-No build step. No config. The UI installs the bundle's dependencies for you and
-runs it the way its shape expects.
+## Quick start (the one command)
+
+From a directory that holds your compiled harness (and its `crewhaus.yaml`):
+
+```bash
+bunx @crewhaus/ui          # detect the shape, write a runner, install the dep
+bun crewhaus-ui.ts         # run it  ->  http://localhost:4100
+```
+
+`bunx @crewhaus/ui` auto-detects the shape from your spec's `target:` and the
+compiled files, then writes a 3-line local runner that "just works":
+
+```ts
+// crewhaus-ui.ts
+import { serve } from "@crewhaus/ui";
+serve({ shape: "cli", harnessDir: import.meta.dir });
+```
+
+Force a shape, run without writing a file, or list shapes:
+
+```bash
+bunx @crewhaus/ui channel          # force the shape
+bunx @crewhaus/ui serve            # run now, no file written
+bunx @crewhaus/ui list             # list all shapes
+```
+
+Flags: `--dir <harness>` `--out <file>` `--port <n>` `--serve` `--shape <name>`
+`--force` `--no-install`. Run `bunx @crewhaus/ui --help` for the full list.
+
+## Programmatic API
+
+```ts
+import { serve, detectShape, scaffold, listShapes } from "@crewhaus/ui";
+
+serve({ shape: "graph", harnessDir: "./build", port: 4100 });
+```
+
+## Develop against the repo
+
+This repo is also runnable directly (the source the package ships):
 
 ```
 crewhaus compile crewhaus.yaml -o build      # compile your spec to a shape
