@@ -324,7 +324,7 @@
       stop: () => conn.send({ type: "stop" }),
       restart: () => conn.send({ type: "restart" }),
       install: () => conn.send({ type: "install" }),
-      sendInput: (text) => conn.send({ type: "input", text }),
+      sendInput: (text, opts) => conn.send({ type: "input", text, silent: !!(opts && opts.silent) }),
       log: (line, cls) => term.write(line, cls),
       openLog: () => {
         if (!logOpen) toggleLog();

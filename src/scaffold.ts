@@ -53,7 +53,14 @@ export function detectShape(dir: string): string | null {
   // Claude plugin bundles carry a manifest, never a runnable entry.
   if (has(".claude-plugin/plugin.json") || has(".claude-plugin")) return "claude-plugin";
 
-  const target = readSpecTarget(dir);
+  // The spec usually sits in the project root while the compiled files land in
+  // build/ or dist/ — so look in the harness dir, its parent, and the cwd.
+  const searchDirs = [...new Set([dir, dirname(dir), process.cwd()])];
+  let target: string | null = null;
+  for (const d of searchDirs) {
+    target = readSpecTarget(d);
+    if (target) break;
+  }
 
   // A worker.js + wrangler.toml is a Cloudflare emit of a cli/graph/workflow spec.
   if (has("worker.js") && has("wrangler.toml")) {

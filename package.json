@@ -1,6 +1,6 @@
 {
   "name": "@crewhaus/ui",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Drop-in web UIs for every CrewHaus harness shape, plus a one-command scaffolder. Compile a spec, point @crewhaus/ui at it, get a polished shape-aware UI in the browser.",
   "type": "module",
   "license": "Apache-2.0",

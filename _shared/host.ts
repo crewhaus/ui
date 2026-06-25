@@ -355,7 +355,7 @@ function drain(buf: string): Drained {
 
 type ClientMsg =
   | { type: "submit"; text: string }
-  | { type: "input"; text: string }
+  | { type: "input"; text: string; silent?: boolean }
   | { type: "start"; text?: string }
   | { type: "stop" }
   | { type: "restart" }
@@ -405,7 +405,7 @@ class Supervisor {
         await this.start(msg.text);
         break;
       case "input":
-        this.writeStdin(msg.text);
+        this.writeStdin(msg.text, msg.silent);
         break;
       case "stop":
         this.stop();
@@ -497,11 +497,11 @@ class Supervisor {
     });
   }
 
-  writeStdin(text: string) {
+  writeStdin(text: string, silent?: boolean) {
     if (!this.proc?.stdin) return;
     this.proc.stdin.write(text.endsWith("\n") ? text : `${text}\n`);
     this.proc.stdin.flush?.();
-    this.broadcast({ type: "user", text });
+    if (!silent) this.broadcast({ type: "user", text });
   }
 
   stop() {
