@@ -41,17 +41,31 @@ import { serve, detectShape, scaffold, listShapes } from "@crewhaus/ui";
 serve({ shape: "graph", harnessDir: "./build", port: 4100 });
 ```
 
-## Develop against the repo
+## Serve a standalone harness UI
 
-This repo is also runnable directly (the source the package ships):
+If you already have a standalone harness directory (its own `crewhaus.yaml`
+plus a compiled bundle), run the UI from **inside** that directory — the CLI
+resolves the spec and bundle from the current working directory:
+
+```bash
+cd starters/<name>          # if copied elsewhere, cd into that copy
+bunx crewhaus compile crewhaus.yaml -o dist
+bunx @crewhaus/ui          # detect the shape, write a runner, install the dep
+bun crewhaus-ui.ts         # run it  ->  http://localhost:4100
+```
+
+That's it. Open the URL and press **Start** (or **Run**).
+
+### Contributors / develop against this repo
+
+This repo is also runnable directly (the source the package ships). This is the
+in-repo contributor dev loop, run from the repo root — not the end-user path:
 
 ```
 crewhaus compile crewhaus.yaml -o build      # compile your spec to a shape
 cp build/* ui/<shape>/harness/               # drop the compiled files in
 bun ui/<shape>/serve.ts                      # run the UI  ->  http://localhost:4100
 ```
-
-That's it. Open the URL and press **Start** (or **Run**).
 
 ## Shapes
 
