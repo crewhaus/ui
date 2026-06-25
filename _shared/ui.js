@@ -423,15 +423,24 @@
       scroll();
       return content;
     }
+    // At most ONE streaming cursor exists at a time — clear any stragglers
+    // before opening a new bubble or ending a turn.
+    function killCursor() {
+      list.querySelectorAll(".cursor-blink").forEach((n) => n.classList.remove("cursor-blink"));
+    }
     return {
       user(text) {
+        killCursor();
         const c = bubble("user");
         c.textContent = text;
         current = null;
         buffer = "";
       },
       assistant(text) {
+        // Don't open an empty bubble on leading whitespace/newlines.
+        if (!current && !text.trim()) return;
         if (!current) {
+          killCursor();
           current = bubble("assistant", opts.agentLabel);
           current.classList.add("md");
           buffer = "";
@@ -442,16 +451,18 @@
         scroll();
       },
       endTurn() {
-        if (current) current.classList.remove("cursor-blink");
+        killCursor();
         current = null;
         buffer = "";
       },
       node(n) {
+        killCursor();
         list.appendChild(n);
         current = null;
         scroll();
       },
       systemNote(text) {
+        killCursor();
         list.appendChild(
           el("div", { class: "msg assistant" }, [
             el("div", { class: "avatar" }, icon("sparkles", 15)),

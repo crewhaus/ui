@@ -1037,6 +1037,43 @@ kbd {
   }
 }
 
+/* ── Permission prompt card ─────────────────────────────────────────────── */
+
+.perm-card {
+  margin: 4px 0 4px 40px;
+  background: var(--amber-ghost);
+  border: 1px solid rgba(230, 180, 80, 0.3);
+  border-left: 2px solid var(--amber);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  animation: rise 0.18s ease both;
+}
+.perm-q {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--ink);
+  margin-bottom: 10px;
+}
+.perm-q .mono {
+  color: var(--amber);
+  font-weight: 600;
+}
+.perm-q svg {
+  color: var(--amber);
+}
+.perm-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.perm-note {
+  margin-top: 9px;
+  font-size: 12px;
+  font-family: var(--mono);
+}
+
 /* ── Theme color chooser ────────────────────────────────────────────────── */
 
 .accent-dot {

@@ -23,7 +23,72 @@
       let feedEl = null;
       let statEls = null;
       let turnActive = false;
+      let turnStdout = ""; // raw stdout of the active turn (for permission-prompt detection)
+      let promptsHandled = 0;
+      const autoApprove = new Set(); // tools the user chose "always allow" for
       const stats = events.newStats();
+
+      function resetTurn() {
+        turnStdout = "";
+        promptsHandled = 0;
+      }
+
+      // The compiled agent prints `approve <tool> <input> [y/N] >` and blocks on
+      // stdin. Surface clickable buttons instead of making the user type.
+      function maybePrompt() {
+        if (!chat) return;
+        const all = [...turnStdout.matchAll(/approve\s+(\S+)[\s\S]*?\[y\s*\/\s*N\]/gi)];
+        if (all.length <= promptsHandled) return;
+        promptsHandled = all.length;
+        const tool = all[all.length - 1][1];
+        if (autoApprove.has(tool)) {
+          api.sendInput("y", { silent: true });
+          chat.systemNote(`Auto-approved ${tool} (always allow)`);
+          return;
+        }
+        chat.node(permissionCard(tool));
+      }
+
+      function permissionCard(tool) {
+        const note = el("div", { class: "perm-note muted" });
+        let done = false;
+        const answer = (input, label, always) => {
+          if (done) return;
+          done = true;
+          if (always) autoApprove.add(tool);
+          api.sendInput(input, { silent: true });
+          for (const b of actions.children) b.disabled = true;
+          note.textContent = label;
+        };
+        const actions = el("div", { class: "perm-actions" }, [
+          el("button", { class: "btn primary sm", onClick: () => answer("y", "✓ Approved") }, [
+            icon("check", 14),
+            el("span", { text: "Yes" }),
+          ]),
+          el("button", { class: "btn ghost sm", onClick: () => answer("n", "✗ Denied") }, [
+            icon("x", 14),
+            el("span", { text: "No" }),
+          ]),
+          el(
+            "button",
+            {
+              class: "btn ghost sm",
+              title: `Approve every ${tool} call for the rest of this session`,
+              onClick: () => answer("y", `✓ Always allowing ${tool}`, true),
+            },
+            [icon("shield", 14), el("span", { text: `Always allow ${tool}` })],
+          ),
+        ]);
+        return el("div", { class: "perm-card" }, [
+          el("div", { class: "perm-q" }, [
+            icon("shield", 15),
+            el("span", { text: "Permission requested · " }),
+            el("span", { class: "mono", text: tool }),
+          ]),
+          actions,
+          note,
+        ]);
+      }
 
       function updateStats() {
         if (!statEls) return;
@@ -40,6 +105,7 @@
         if (ev.kind === "turn_end" && chat) {
           chat.endTurn();
           turnActive = false;
+          resetTurn();
         }
         const node = events.render(ev);
         if (node && feedEl) {
@@ -53,13 +119,18 @@
         if (chat) {
           chat.user(m.text);
           turnActive = true;
+          resetTurn();
         }
       });
       api.on("stdout", (m) => {
         const txt = stripAnsi(m.text);
-        if (!txt.trim() && txt.indexOf("\n") < 0) return;
-        if (turnActive && chat) chat.assistant(txt);
-        else api.log(txt, "stdout");
+        if (turnActive && chat) {
+          chat.assistant(txt);
+          turnStdout += txt;
+          maybePrompt();
+        } else if (txt.trim() || txt.indexOf("\n") >= 0) {
+          api.log(txt, "stdout");
+        }
       });
       api.on("event", (m) => pushEvent(m.event));
       api.on("status", (m) => {
@@ -69,6 +140,7 @@
         else if (m.state === "exited") {
           chat.endTurn();
           turnActive = false;
+          resetTurn();
           chat.systemNote("Agent process exited. Press Start to run it again.");
         } else if (m.state === "error") {
           chat.systemNote("The agent could not start — check the raw output log.");
