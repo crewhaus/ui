@@ -22,7 +22,8 @@
  */
 
 import { spawn } from "bun";
-import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
 // -- Types --------------------------------------------------------------------
@@ -359,7 +360,20 @@ type ClientMsg =
   | { type: "start"; text?: string }
   | { type: "stop" }
   | { type: "restart" }
-  | { type: "install" };
+  | { type: "install" }
+  // A human rating on an assistant turn. Persisted to the harness's
+  // .crewhaus/feedback/feedback.jsonl (read by `crewhaus distill`) — never
+  // written to the child's stdin, since a rating is not a conversation turn.
+  | {
+      type: "feedback";
+      sessionId?: string;
+      turnNumber?: number;
+      thumbs?: "up" | "down";
+      stars?: number;
+      score?: number;
+      comment?: string;
+      correction?: string;
+    };
 
 type Broadcast = (msg: unknown) => void;
 
@@ -407,6 +421,9 @@ class Supervisor {
       case "input":
         this.writeStdin(msg.text, msg.silent);
         break;
+      case "feedback":
+        this.writeFeedback(msg);
+        break;
       case "stop":
         this.stop();
         break;
@@ -414,6 +431,82 @@ class Supervisor {
         this.stop();
         await this.start();
         break;
+    }
+  }
+
+  /**
+   * Persist a UI rating as a modality-flexible FeedbackRecord line in the
+   * harness's `.crewhaus/feedback/feedback.jsonl`. Written under `harnessDir`
+   * (not the server cwd) so it lands with the harness's own session data for
+   * both in-repo and npm-package layouts, and NEVER to the child's stdin.
+   */
+  private writeFeedback(msg: Extract<ClientMsg, { type: "feedback" }>) {
+    const sessionId = typeof msg.sessionId === "string" ? msg.sessionId : "";
+    if (!/^sess_[0-9a-f]{16}$/.test(sessionId)) {
+      // The record keys to a session; without one it could not be distilled.
+      this.log("Ignored a rating with no session id (start a conversation first).");
+      return;
+    }
+    const rating: Record<string, unknown> = {};
+    let modality: "binary" | "stars" | "scale" | "comment" | undefined;
+    if (msg.thumbs === "up" || msg.thumbs === "down") {
+      rating.thumbs = msg.thumbs;
+      modality = "binary";
+    }
+    if (typeof msg.stars === "number" && msg.stars >= 1 && msg.stars <= 5) {
+      rating.stars = Math.round(msg.stars);
+      modality = "stars";
+    }
+    if (typeof msg.score === "number" && msg.score >= 0 && msg.score <= 1) {
+      rating.scale = { value: msg.score, min: 0, max: 1 };
+      modality = "scale";
+    }
+    // Untrusted free text flows into the distilled dataset + optimizer
+    // meta-prompt: strip control chars (keep tab/newline/CR) and bound length.
+    const clip = (s: string): string => {
+      let out = "";
+      for (const ch of s) {
+        const c = ch.codePointAt(0) ?? 0;
+        if (c === 9 || c === 10 || c === 13 || (c >= 0x20 && c !== 0x7f && !(c >= 0x80 && c <= 0x9f))) {
+          out += ch;
+        }
+        if (out.length >= 8192) break;
+      }
+      return out;
+    };
+    const comment = typeof msg.comment === "string" && msg.comment.trim() !== "" ? clip(msg.comment) : undefined;
+    const correction =
+      typeof msg.correction === "string" && msg.correction.trim() !== "" ? clip(msg.correction) : undefined;
+    if (modality === undefined) {
+      if (comment === undefined && correction === undefined) {
+        this.log("Ignored a rating with no thumbs / stars / comment.");
+        return;
+      }
+      modality = "comment";
+    }
+    const turnNumber =
+      typeof msg.turnNumber === "number" && Number.isFinite(msg.turnNumber) && msg.turnNumber >= 0
+        ? Math.floor(msg.turnNumber)
+        : 0;
+    const record = {
+      schemaVersion: 1,
+      id: `fb_${randomBytes(6).toString("hex")}`,
+      sessionId,
+      turnNumber,
+      modality,
+      rating,
+      ...(comment !== undefined ? { comment } : {}),
+      ...(correction !== undefined ? { correction } : {}),
+      source: "ui",
+      ts: new Date().toISOString(),
+    };
+    try {
+      const dir = join(this.harnessDir, ".crewhaus", "feedback");
+      mkdirSync(dir, { recursive: true });
+      appendFileSync(join(dir, "feedback.jsonl"), `${JSON.stringify(record)}\n`, { mode: 0o600 });
+      this.log(`Recorded ${modality} feedback on turn ${turnNumber}.`);
+    } catch (err) {
+      this.log(`Failed to record feedback: ${(err as Error).message}`);
     }
   }
 

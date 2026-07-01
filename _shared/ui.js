@@ -117,6 +117,11 @@
     dot: '<circle cx="12" cy="12" r="4"/>',
     wand: '<path d="M15 4V2M15 16v-2M8 9h2M20 9h2M17.8 11.8 19 13M15 9h0M17.8 6.2 19 5M3 21l9-9M12.2 6.2 11 5"/>',
     coin: '<circle cx="12" cy="12" r="8"/><path d="M12 8v8M9.5 10.5h3.5a1.5 1.5 0 0 1 0 3H9.5"/>',
+    thumbsUp:
+      '<path d="M7 10v12"/><path d="M15 5.88 14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h2.76a2 2 0 0 0 1.79-1.11L12 2a3.13 3.13 0 0 1 3 3.88Z"/>',
+    thumbsDown:
+      '<path d="M17 14V2"/><path d="M9 18.12 10 14H4.17a2 2 0 0 1-1.92-2.56l2.33-8A2 2 0 0 1 6.5 2H20a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2.76a2 2 0 0 0-1.79 1.11L12 22a3.13 3.13 0 0 1-3-3.88Z"/>',
+    star: '<polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>',
   };
   const _iconCache = {};
   function iconTemplate(name) {
@@ -395,6 +400,92 @@
     };
   }
 
+  // ── Rating bar ────────────────────────────────────────────────────────────
+  // A per-turn feedback affordance: 👍/👎 always visible, with a progressive
+  // expander for a 1–5 star score and a comment/correction. DOM-only (no
+  // innerHTML) and one-shot — it locks after the first submission, mirroring
+  // the permission-card UX. `onSubmit(payload)` receives { thumbs? | stars? }
+  // plus an optional { comment, correction }.
+  function ratingBar(onSubmit) {
+    let done = false;
+    const bar = el("div", { class: "rate-bar" });
+    function lock(label) {
+      if (done) return;
+      done = true;
+      clear(bar);
+      bar.classList.add("rated");
+      add(bar, [icon("check", 13), el("span", { class: "rate-status", text: label })]);
+    }
+    function send(payload, label) {
+      if (done) return;
+      onSubmit(payload);
+      lock(label);
+    }
+    const up = el(
+      "button",
+      { class: "rate-btn", title: "Good response", "aria-label": "Thumbs up",
+        onClick: () => send({ thumbs: "up" }, "Thanks — recorded 👍") },
+      icon("thumbsUp", 14),
+    );
+    const down = el(
+      "button",
+      { class: "rate-btn", title: "Bad response", "aria-label": "Thumbs down",
+        onClick: () => send({ thumbs: "down" }, "Thanks — recorded 👎") },
+      icon("thumbsDown", 14),
+    );
+
+    // Progressive disclosure: stars + comment behind a "more" toggle.
+    let stars = 0;
+    const starEls = [];
+    const starRow = el("div", { class: "rate-stars" });
+    function setStars(n) {
+      stars = n;
+      starEls.forEach((s, i) => s.classList.toggle("on", i < n));
+    }
+    for (let i = 1; i <= 5; i++) {
+      const s = el(
+        "button",
+        { class: "rate-star", title: `${i} star${i > 1 ? "s" : ""}`, "aria-label": `${i} stars`,
+          onClick: () => setStars(i) },
+        icon("star", 14),
+      );
+      starEls.push(s);
+      starRow.appendChild(s);
+    }
+    const commentEl = el("textarea", {
+      class: "rate-comment",
+      rows: 2,
+      placeholder: "Comment or a better answer (optional)",
+    });
+    const sendBtn = el(
+      "button",
+      { class: "btn primary sm", onClick: () => {
+        const payload = {};
+        if (stars > 0) payload.stars = stars;
+        const c = commentEl.value.trim();
+        if (c) payload.comment = c;
+        if (payload.stars === undefined && payload.comment === undefined) return;
+        send(payload, "Thanks — feedback recorded");
+      } },
+      "Send feedback",
+    );
+    const panel = el("div", { class: "rate-panel", style: { display: "none" } }, [
+      starRow,
+      commentEl,
+      el("div", { class: "rate-panel-foot" }, sendBtn),
+    ]);
+    const more = el(
+      "button",
+      { class: "rate-btn rate-more", title: "Add stars or a comment", "aria-label": "More feedback",
+        onClick: () => {
+          panel.style.display = panel.style.display === "none" ? "flex" : "none";
+        } },
+      icon("chevron", 14),
+    );
+    add(bar, [el("span", { class: "rate-label", text: "Rate this reply" }), up, down, more, panel]);
+    return bar;
+  }
+
   // ── Chat component ────────────────────────────────────────────────────────
   function Chat(mount, opts) {
     opts = opts || {};
@@ -403,6 +494,11 @@
     let current = null; // active assistant content node
     let buffer = "";
     let atBottom = true;
+    // turnNo counts user-text turns (1-based) — the same ordinal `crewhaus
+    // distill` derives from the transcript, so a rating keys to the right
+    // exchange. lastAssistantMsg is the .msg element the rating bar attaches to.
+    let turnNo = 0;
+    let lastAssistantMsg = null;
     mount.addEventListener("scroll", () => {
       atBottom = mount.scrollHeight - mount.scrollTop - mount.clientHeight < 60;
     });
@@ -431,6 +527,7 @@
     return {
       user(text) {
         killCursor();
+        turnNo += 1;
         const c = bubble("user");
         c.textContent = text;
         current = null;
@@ -443,6 +540,7 @@
           killCursor();
           current = bubble("assistant", opts.agentLabel);
           current.classList.add("md");
+          lastAssistantMsg = current.closest(".msg");
           buffer = "";
         }
         buffer += text;
@@ -452,6 +550,19 @@
       },
       endTurn() {
         killCursor();
+        // Attach a one-shot rating bar to the assistant reply that just
+        // finished (once per turn). Stamped with this turn's ordinal.
+        if (
+          typeof opts.onRate === "function" &&
+          lastAssistantMsg &&
+          !lastAssistantMsg.querySelector(".rate-bar")
+        ) {
+          const tn = turnNo;
+          const host = lastAssistantMsg.querySelector(".bubble") || lastAssistantMsg;
+          host.appendChild(ratingBar((payload) => opts.onRate(tn, payload)));
+          scroll();
+        }
+        lastAssistantMsg = null;
         current = null;
         buffer = "";
       },
