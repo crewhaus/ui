@@ -25,6 +25,7 @@
       let turnActive = false;
       let turnStdout = ""; // raw stdout of the active turn (for permission-prompt detection)
       let promptsHandled = 0;
+      let lastSessionId = null; // latched from trace events to stamp ratings
       const autoApprove = new Set(); // tools the user chose "always allow" for
       const stats = events.newStats();
 
@@ -102,6 +103,7 @@
       function pushEvent(ev) {
         events.accrue(ev, stats);
         updateStats();
+        if (ev && typeof ev.sessionId === "string") lastSessionId = ev.sessionId;
         if (ev.kind === "turn_end" && chat) {
           chat.endTurn();
           turnActive = false;
@@ -186,7 +188,11 @@
           leftScroll,
           leftFoot,
         ]);
-        chat = Chat(leftScroll, { agentLabel: api.config.title });
+        chat = Chat(leftScroll, {
+          agentLabel: api.config.title,
+          onRate: (turnNumber, payload) =>
+            api.sendFeedback({ sessionId: lastSessionId, turnNumber, ...payload }),
+        });
         composer = Composer(leftFoot, (txt) => api.sendInput(txt), {
           placeholder: "Message the agent…",
         });

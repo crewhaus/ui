@@ -325,6 +325,11 @@
       restart: () => conn.send({ type: "restart" }),
       install: () => conn.send({ type: "install" }),
       sendInput: (text, opts) => conn.send({ type: "input", text, silent: !!(opts && opts.silent) }),
+      // Record a human rating on an assistant turn. `payload` carries the
+      // sessionId + turnNumber the rating bar stamped, plus one of
+      // thumbs/stars/score and/or comment/correction. The host writes it to
+      // .crewhaus/feedback/ — it is never fed back into the agent's stdin.
+      sendFeedback: (payload) => conn.send({ type: "feedback", ...payload }),
       log: (line, cls) => term.write(line, cls),
       openLog: () => {
         if (!logOpen) toggleLog();
