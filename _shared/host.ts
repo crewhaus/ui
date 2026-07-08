@@ -116,6 +116,31 @@ function loadEnvChain(harnessDir: string): Record<string, string> {
   };
 }
 
+/**
+ * The harness ROOT is the directory whose spec the compiled bundle's relative
+ * paths resolve against — MCP server commands (`bun thredz-mcp/server.ts`),
+ * `retrieve` data roots, the `.crewhaus/` session store, `.env`, etc. That is
+ * the directory holding `crewhaus.yaml`, which is what a standalone harness is
+ * always meant to run FROM.
+ *
+ * The compiled bundle often lives in a `dist/`/`build/` SUBDIR of that root
+ * (e.g. `crewhaus compile crewhaus.yaml -o dist`), and the scaffolded runner
+ * points `harnessDir` at that subdir. Running the agent with cwd = the bundle
+ * dir then breaks every spec-relative path (the MCP servers fail to spawn and
+ * the agent exits). So the runtime cwd must be this root, NOT the bundle dir.
+ * Walk up from the given dir to find it; fall back to the dir itself.
+ */
+function findHarnessRoot(harnessDir: string): string {
+  let d = resolve(harnessDir);
+  for (let i = 0; i < 4; i++) {
+    if (existsSync(join(d, "crewhaus.yaml")) || existsSync(join(d, "daemon.yaml"))) return d;
+    const parent = dirname(d);
+    if (parent === d) break;
+    d = parent;
+  }
+  return resolve(harnessDir);
+}
+
 // -- Harness detection --------------------------------------------------------
 
 type HarnessState = {
@@ -147,14 +172,21 @@ function listHarnessFiles(harnessDir: string): string[] {
 function detectHarness(harnessDir: string, config: ShapeConfig): HarnessState {
   const files = listHarnessFiles(harnessDir);
   const present = files.filter((f) => !/README|DROP_/i.test(f)).length > 0;
+  // The bundle may sit directly in harnessDir or in a dist/ / build/ subdir
+  // (the standard `crewhaus compile -o dist` output). Accept either.
   let entry: string | null = null;
-  for (const cand of config.entry) {
-    if (files.includes(cand)) {
-      entry = cand;
-      break;
+  outer: for (const cand of config.entry) {
+    for (const prefix of ["", "dist/", "build/"]) {
+      if (files.includes(prefix + cand)) {
+        entry = prefix + cand;
+        break outer;
+      }
     }
   }
-  const depsInstalled = existsSync(join(harnessDir, "node_modules"));
+  const depsInstalled =
+    existsSync(join(harnessDir, "node_modules")) ||
+    existsSync(join(harnessDir, "dist", "node_modules")) ||
+    existsSync(join(harnessDir, "build", "node_modules"));
   const state: HarnessState = { present, files, entry, depsInstalled };
   if (config.runClass === "plugin") {
     state.manifest = readPluginManifest(harnessDir, files);
@@ -542,8 +574,14 @@ class Supervisor {
     this.stop();
     this.setState("starting");
 
+    // Run the agent FROM the harness root (where crewhaus.yaml lives), not the
+    // bundle dir — otherwise spec-relative paths (MCP servers, data roots,
+    // .crewhaus/, .env) resolve against the wrong directory and the agent
+    // exits on boot. The entry bundle may itself live in a dist/ subdir.
+    const harnessRoot = findHarnessRoot(this.harnessDir);
+
     const env: Record<string, string> = {
-      ...loadEnvChain(this.harnessDir),
+      ...loadEnvChain(harnessRoot),
       ...process.env,
       CREWHAUS_TRACE: "json",
       CREWHAUS_COST_TRACKING: "1",
@@ -556,8 +594,11 @@ class Supervisor {
     }
 
     const entryPath = join(this.harnessDir, h.entry);
+    if (harnessRoot !== resolve(this.harnessDir)) {
+      this.log(`running ${entryPath}\n  cwd: ${harnessRoot} (harness root)`, "stderr");
+    }
     const proc = spawn(["bun", entryPath], {
-      cwd: this.harnessDir,
+      cwd: harnessRoot,
       env,
       stdin: "pipe",
       stdout: "pipe",
