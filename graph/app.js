@@ -448,15 +448,19 @@
           if (!running) setRunning(true);
         } else if (m.state === "exited") {
           setRunning(false);
+          const exit = CH.failure.exitInfo(m);
           if (resultMeta && !pausedInfo && finalState) resultMeta.textContent = "run complete";
           else if (resultMeta && pausedInfo) resultMeta.textContent = "paused — resume from shell";
-          else if (resultMeta && !finalState) resultMeta.textContent = "process exited";
+          else if (resultMeta && !finalState)
+            resultMeta.textContent = exit.failed ? `stopped — ${exit.line}` : "process exited";
           if (!finalState && !resultBuf.trim() && !pausedInfo && resultEl) {
             clear(resultEl);
             resultEl.appendChild(
               el("div", {
                 class: "muted result-placeholder",
-                text: "The run produced no output — check the raw log.",
+                text: exit.failed
+                  ? `The run stopped — ${exit.line}. See the raw output log.`
+                  : "The run produced no output — check the raw log.",
               }),
             );
           }

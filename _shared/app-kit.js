@@ -252,19 +252,32 @@
     root.appendChild(shell);
 
     // ── WS plumbing ──────────────────────────────────────────────────────
+    // v0.3.0 honest failure messaging: a nonzero exit gets the short label
+    // from the CrewHaus exit-code table on the status pill ("exited · out
+    // of funding (provider billing) · exit 31") instead of the bare detail.
+    function statusDetail(msg) {
+      if (msg.state !== "exited" || !window.CH.failure) return msg.detail || "";
+      const exit = window.CH.failure.exitInfo(msg);
+      return (exit.failed && exit.line) || msg.detail || "";
+    }
     conn.on("*", (msg) => emit(msg.type, msg));
     conn.on("state", (msg) => {
       config = msg.config || config;
       live = { ...msg, config };
       applyConfig();
-      setStatus(statusEl, live.state || "idle", msg.detail || "");
+      setStatus(statusEl, live.state || "idle", statusDetail(msg));
       refreshControls();
       stateHandlers.forEach((cb) => cb(live));
     });
     conn.on("status", (msg) => {
       live.state = msg.state;
-      setStatus(statusEl, msg.state, msg.detail || "");
+      setStatus(statusEl, msg.state, statusDetail(msg));
       refreshControls();
+      // A crash auto-opens the raw-output drawer — the stderr/stack the user
+      // needs to diagnose it is otherwise hidden behind a closed drawer.
+      const exit =
+        msg.state === "exited" && window.CH.failure ? window.CH.failure.exitInfo(msg) : null;
+      if (exit && exit.failed && !logOpen) toggleLog();
       stateHandlers.forEach((cb) => cb(live));
     });
     conn.on("log", (m) => term.system(m.line));
@@ -339,6 +352,10 @@
       isPresent: () => live.harness && live.harness.present,
       isRunning: () => live.state === "running",
     };
+
+    // Failure cards built by CH.events (which has no api handle) use this to
+    // open the raw-output drawer. One app per page, so a global slot is safe.
+    window.CH.openRawLog = api.openLog;
 
     spec.build(api);
     conn.connect();
