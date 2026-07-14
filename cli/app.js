@@ -26,6 +26,7 @@
       let turnStdout = ""; // raw stdout of the active turn (for permission-prompt detection)
       let promptsHandled = 0;
       let lastSessionId = null; // latched from trace events to stamp ratings
+      let sawRunFailed = false; // a run_failed card is already in the chat
       const autoApprove = new Set(); // tools the user chose "always allow" for
       const stats = events.newStats();
 
@@ -109,6 +110,13 @@
           turnActive = false;
           resetTurn();
         }
+        // Terminal failure: put the full failure card (title + provider text
+        // + remediation + Show raw output) in the chat, where the user is
+        // looking — the activity feed gets its copy via events.render below.
+        if (ev.kind === "run_failed") {
+          sawRunFailed = true;
+          if (chat) chat.node(events.failureCard(ev));
+        }
         const node = events.render(ev);
         if (node && feedEl) {
           feedEl.appendChild(node);
@@ -138,12 +146,25 @@
       api.on("status", (m) => {
         if (composer) composer.setEnabled(m.state === "running");
         if (!chat) return;
-        if (m.state === "running") chat.systemNote("Agent booted. Send a message to start the conversation.");
-        else if (m.state === "exited") {
+        if (m.state === "running") {
+          sawRunFailed = false;
+          chat.systemNote("Agent booted. Send a message to start the conversation.");
+        } else if (m.state === "exited") {
           chat.endTurn();
           turnActive = false;
           resetTurn();
-          chat.systemNote("Agent process exited. Press Start to run it again.");
+          const exit = CH.failure.exitInfo(m);
+          if (!exit.failed) {
+            chat.systemNote("Agent process exited. Press Start to run it again.");
+          } else {
+            // Crash. If the live event stream never delivered the run_failed
+            // card, fall back to the copy the host attached to this broadcast
+            // — or to the last stderr lines when the process died before
+            // emitting anything structured. (app-kit auto-opens the drawer.)
+            if (!sawRunFailed && exit.failure) chat.node(events.failureCard(exit.failure));
+            else if (!sawRunFailed && exit.stderrTail) chat.node(events.stderrTailCard(exit.stderrTail));
+            chat.systemNote(`Agent process exited — ${exit.line}. Press Start to run it again.`);
+          }
         } else if (m.state === "error") {
           chat.systemNote("The agent could not start — check the raw output log.");
           api.openLog();

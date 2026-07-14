@@ -354,16 +354,22 @@
         setRunControls(m.state);
         if (m.state === "exited") {
           flushProse();
+          const exit = CH.failure.exitInfo(m);
           if (run && run.status === "running") {
             // Exited without a browser_done (error or abort before the answer).
             run.status = "exited";
             for (const s of run.steps) if (s.status === "running") { s.status = "done"; renderStepNode(s); }
-            if (!run.finalText && !run.prose.trim()) {
+            if (exit.failed) {
+              setStatusLine(`Process exited — ${exit.line}. Check the raw output log.`, "error");
+            } else if (!run.finalText && !run.prose.trim()) {
               setStatusLine("Process exited before producing an answer — check the raw output log.", "idle");
             } else {
               renderResult(true);
               setStatusLine("Process exited. Run again to start a new task.", "idle");
             }
+          } else if (exit.failed) {
+            // Crash outside a task run (e.g. boot failure after spawn).
+            setStatusLine(`Process exited — ${exit.line}. Check the raw output log.`, "error");
           }
         } else if (m.state === "error") {
           if (run) run.status = "error";

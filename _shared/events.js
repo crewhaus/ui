@@ -8,7 +8,8 @@
    for shape-specific panels (graph nodes, crew roles, eval verdicts, …).
 
    Exposes CH.events = { render(ev) -> Node|null, accrue(ev, stats), newStats(),
-                         card(opts), FEED_SKIP:Set }
+                         card(opts), failureCard(ev), stderrTailCard(lines),
+                         FEED_SKIP:Set }
    ========================================================================== */
 (function () {
   "use strict";
@@ -110,13 +111,25 @@
       title: `compaction (${e.subKind})`,
       sub: `${fmtTokens(e.before)} -> ${fmtTokens(e.after)} tokens · ${e.phase}`,
     }),
-    error_recovered: (e) => ({
-      icon: "refresh",
-      sev: "warn",
-      name: e.errorName,
-      title: `recovered: ${e.action}`,
-      meta: `depth ${e.depth}`,
-    }),
+    // `fail` and `halt` are TERMINAL — the run is over, nothing was recovered.
+    // (`halt` is v0.3.0's classified stop: billing/auth/rate-limit; the
+    // accompanying `run_failed` event carries the human-readable report.)
+    error_recovered: (e) =>
+      e.action === "halt" || e.action === "fail"
+        ? {
+            icon: "alert",
+            sev: "error",
+            name: e.errorName,
+            title: e.action === "halt" ? "halted — terminal failure" : "recovery failed",
+            meta: `depth ${e.depth}`,
+          }
+        : {
+            icon: "refresh",
+            sev: "warn",
+            name: e.errorName,
+            title: `recovered: ${e.action}`,
+            meta: `depth ${e.depth}`,
+          },
     sub_agent_start: (e) => ({
       icon: "bot",
       sev: "info",
@@ -234,8 +247,67 @@
     return `${Math.round((a / b) * 100)}%`;
   }
 
+  // ── Run-failure cards (v0.3.0 honest failure messaging) ───────────────────
+
+  /** "Show raw output" — app-kit points CH.openRawLog at the drawer toggle. */
+  function showRawButton() {
+    return el(
+      "button",
+      {
+        class: "btn ghost sm",
+        onClick: () => window.CH.openRawLog && window.CH.openRawLog(),
+      },
+      [icon("terminal", 13), el("span", { text: "Show raw output" })],
+    );
+  }
+
+  /**
+   * The rich card for a `run_failed` trace event: class-styled (billing /
+   * auth / rate_limit get distinct treatment via CSS), a title line, the
+   * provider's raw message, the remediation line, and a "Show raw output"
+   * affordance. Returns a fresh node each call (usable in feed AND chat).
+   */
+  function failureCard(ev) {
+    const split = window.CH.failure
+      ? window.CH.failure.splitMessage(ev.message)
+      : { title: String(ev.message || ""), detail: "" };
+    const cls = typeof ev.class === "string" ? ev.class : "unknown";
+    const exitCode = typeof ev.exitCode === "number" ? ev.exitCode : null;
+    return el("div", { class: `failure-card failure-${cls}` }, [
+      el("div", { class: "failure-title" }, [
+        icon("alert", 15),
+        el("span", { text: `Run stopped — ${split.title || "unexpected error"}` }),
+        el("span", { class: "grow" }),
+        el("span", {
+          class: "badge err",
+          text: exitCode === null ? cls : `${cls} · exit ${exitCode}`,
+        }),
+      ]),
+      split.detail ? el("div", { class: "failure-raw", text: split.detail }) : null,
+      ev.remediation ? el("div", { class: "failure-fix", text: `Fix: ${ev.remediation}` }) : null,
+      el("div", { class: "failure-actions" }, [showRawButton()]),
+    ]);
+  }
+
+  /**
+   * Fallback card when the process died WITHOUT a structured `run_failed`
+   * event: the host attaches the last few stderr lines to the exit broadcast
+   * (`status.stderrTail`) and this renders them.
+   */
+  function stderrTailCard(lines) {
+    return el("div", { class: "failure-card failure-unknown" }, [
+      el("div", { class: "failure-title" }, [
+        icon("alert", 15),
+        el("span", { text: "Run stopped — last stderr lines" }),
+      ]),
+      el("div", { class: "failure-raw", text: (lines || []).join("\n") }),
+      el("div", { class: "failure-actions" }, [showRawButton()]),
+    ]);
+  }
+
   function render(ev) {
     if (!ev || !ev.kind || FEED_SKIP.has(ev.kind)) return null;
+    if (ev.kind === "run_failed") return failureCard(ev);
     const fn = R[ev.kind];
     const opts = fn ? fn(ev) : { icon: "dot", sev: "muted", title: ev.kind };
     return card(opts);
@@ -256,6 +328,12 @@
       case "tool_call_end":
         if (ev.isError) s.errors++;
         break;
+      // Model/terminal failures count too — exactly one run_failed is
+      // published per terminal failure (the paired error_recovered
+      // fail/halt is NOT counted, to avoid double counting).
+      case "run_failed":
+        s.errors++;
+        break;
       case "sub_agent_start":
         s.subAgents++;
         break;
@@ -270,5 +348,5 @@
     return s;
   }
 
-  window.CH.events = { render, accrue, newStats, card, FEED_SKIP, R };
+  window.CH.events = { render, accrue, newStats, card, failureCard, stderrTailCard, FEED_SKIP, R };
 })();

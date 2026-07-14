@@ -246,9 +246,9 @@
           runActive = true;
           updateProgress();
         } else if (m.state === "exited") {
-          const ok = !/code\s+[^0]/.test(m.detail || "");
-          finalizeRun(ok);
-          if (!ok) toast("Workflow exited with a non-zero code — see raw output", "err");
+          const exit = CH.failure.exitInfo(m);
+          finalizeRun(!exit.failed);
+          if (exit.failed) toast(`Workflow exited — ${exit.line}. See raw output.`, "err");
         } else if (m.state === "error") {
           finalizeRun(false);
           toast("Workflow could not start — see raw output", "err");

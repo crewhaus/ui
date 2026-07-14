@@ -339,7 +339,12 @@
             consumeLine(lineBuf);
             lineBuf = "";
           }
-          chat.systemNote("Daemon process exited. Press Start to run it again.");
+          const exit = CH.failure.exitInfo(m);
+          chat.systemNote(
+            exit.failed
+              ? `Daemon process exited — ${exit.line}. Press Start to run it again.`
+              : "Daemon process exited. Press Start to run it again.",
+          );
         } else if (m.state === "error") {
           chat.systemNote("The daemon could not start — check the raw output log.");
           api.openLog();

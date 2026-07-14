@@ -1252,3 +1252,78 @@ kbd {
   display: flex;
   justify-content: flex-end;
 }
+
+/* ── Run-failure card (v0.3.0 honest failure messaging) ─────────────────────
+   Rendered by CH.events.failureCard() for `run_failed` trace events (and by
+   stderrTailCard() when the process died without one). The base style is the
+   generic red terminal failure; billing / auth / rate_limit get class-keyed
+   treatment so "your account is empty" never reads like a random crash. */
+.failure-card {
+  margin: 6px 0;
+  background: var(--red-ghost);
+  border: 1px solid rgba(239, 111, 111, 0.3);
+  border-left: 3px solid var(--red);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  min-width: 0;
+}
+.failure-card .failure-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--red);
+}
+.failure-card .failure-title svg {
+  flex: 0 0 auto;
+}
+.failure-card .failure-raw {
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ink-2);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.failure-card .failure-fix {
+  font-size: 12.5px;
+  color: var(--ink);
+  word-break: break-word;
+}
+.failure-card .failure-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 2px;
+}
+/* billing — amber: a funding problem, not a crash */
+.failure-card.failure-billing {
+  background: var(--amber-ghost);
+  border-color: rgba(230, 180, 80, 0.35);
+  border-left-color: var(--amber);
+}
+.failure-card.failure-billing .failure-title {
+  color: var(--amber);
+}
+/* auth — violet: fix your credentials */
+.failure-card.failure-auth {
+  background: var(--violet-ghost);
+  border-color: rgba(176, 140, 255, 0.35);
+  border-left-color: var(--violet);
+}
+.failure-card.failure-auth .failure-title {
+  color: var(--violet);
+}
+/* rate_limit — blue: transient pressure, try again later */
+.failure-card.failure-rate_limit {
+  background: var(--blue-ghost);
+  border-color: rgba(100, 181, 255, 0.35);
+  border-left-color: var(--blue);
+}
+.failure-card.failure-rate_limit .failure-title {
+  color: var(--blue);
+}

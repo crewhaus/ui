@@ -144,9 +144,27 @@ shared host (`_shared/host.ts`) does the work:
   responses, role hand-offs, eval verdicts, and more — as they happen.
 
 The front-end is dependency-free: a small DOM toolkit (`_shared/ui.js`), a
-TraceEvent renderer (`_shared/events.js`), shared chrome (`_shared/app-kit.js`),
-and one design system (`_shared/ui.css`). All rendering is built from DOM nodes
-and `textContent`, so a harness can never inject markup into the page.
+TraceEvent renderer (`_shared/events.js`), the run-failure vocabulary
+(`_shared/failure.js`), shared chrome (`_shared/app-kit.js`), and one design
+system (`_shared/ui.css`). All rendering is built from DOM nodes and
+`textContent`, so a harness can never inject markup into the page.
+
+## Run failures
+
+When a run dies, the UI says why instead of a bare "agent exited":
+
+- A **`run_failed` trace event** (factory ≥ 0.3.0) renders as a class-styled
+  failure card — billing / auth / rate-limit get distinct treatment — with the
+  title, the provider's raw message, the remediation line, and a
+  **Show raw output** button. It also counts toward the Errors stat.
+- **Nonzero exits are labeled** from the CrewHaus exit-code table
+  (31 → "out of funding (provider billing)", 30 → auth, 32 → rate/quota,
+  33 → budget cap, 21 → config, 20 → spec, 40 → tool/MCP) on the status pill
+  and in each shape's exit note, and the raw-output drawer opens
+  automatically. Clean exits (code 0) look exactly like before.
+- The host attaches the run's last `run_failed` event — or, failing that, the
+  last few stderr lines — to the exit broadcast, so the failure is explained
+  even when the process died before emitting anything structured.
 
 ## Configuration
 
