@@ -848,6 +848,54 @@
     .v-verified{color:#3fa46b;}
     .v-wiki-back{align-self:flex-start;}
     .v-skills{display:flex;flex-direction:column;gap:10px;}
+    /* settings view (Phase 4) */
+    .v-settings{display:flex;flex-direction:column;gap:10px;min-height:0;}
+    .v-set-head{display:flex;align-items:center;gap:7px;flex-wrap:wrap;}
+    .v-set-tag{font-family:var(--mono);font-size:9.5px;text-transform:uppercase;letter-spacing:.05em;
+      padding:1px 6px;border-radius:999px;border:1px solid var(--rule);color:var(--ink-2);background:var(--panel-3);}
+    .v-set-tag.mode-interpreter{color:#3fa46b;border-color:rgba(63,164,107,.5);background:rgba(63,164,107,.12);}
+    .v-set-tag.mode-compiled{color:#d9982b;border-color:rgba(217,152,43,.5);background:rgba(217,152,43,.12);}
+    .v-set-groups{display:flex;flex-direction:column;gap:8px;}
+    .v-group{border:1px solid var(--rule);border-radius:var(--radius-sm);background:var(--panel-2);overflow:hidden;}
+    .v-group-head{display:flex;align-items:center;gap:7px;padding:7px 9px;cursor:pointer;user-select:none;}
+    .v-group-head:hover{background:var(--panel-3);}
+    .v-group-head svg{flex:0 0 auto;color:var(--ink-3);}
+    .v-group-title{font-size:12.5px;color:var(--ink);font-weight:600;}
+    .v-group-caret{margin-left:auto;transition:transform .12s ease;color:var(--ink-3);}
+    .v-group.open>.v-group-head .v-group-caret{transform:rotate(90deg);}
+    .v-group-body{display:none;flex-direction:column;gap:9px;padding:9px;border-top:1px solid var(--rule);}
+    .v-group.open>.v-group-body{display:flex;}
+    .v-field{display:flex;flex-direction:column;gap:3px;}
+    .v-field-label{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--ink-2);}
+    .v-field-key{font-family:var(--mono);}
+    .v-field-def{font-size:8.5px;color:var(--ink-3);border:1px solid var(--rule);border-radius:4px;padding:0 4px;text-transform:uppercase;letter-spacing:.04em;}
+    .v-input,.v-select,.v-textarea{width:100%;box-sizing:border-box;padding:5px 8px;border:1px solid var(--rule);
+      border-radius:var(--radius-sm);background:var(--panel);color:var(--ink);font-size:12.5px;font-family:inherit;}
+    .v-textarea{font-family:var(--mono);font-size:11.5px;line-height:1.5;resize:vertical;min-height:56px;}
+    .v-input:focus,.v-select:focus,.v-textarea:focus{outline:none;border-color:var(--accent);}
+    .v-check{display:flex;align-items:center;gap:7px;font-size:12.5px;color:var(--ink);cursor:pointer;}
+    .v-sub{border-left:1px solid var(--rule);margin-left:3px;padding-left:9px;display:flex;flex-direction:column;gap:9px;}
+    .v-sub-label{font-family:var(--mono);font-size:11px;color:var(--ink-2);}
+    .v-tags{display:flex;flex-wrap:wrap;gap:5px;align-items:center;}
+    .v-tagchip{display:inline-flex;align-items:center;gap:4px;font-family:var(--mono);font-size:11px;padding:2px 6px;
+      border-radius:6px;border:1px solid var(--rule);background:var(--panel-3);color:var(--ink);}
+    .v-tagchip button{background:none;border:none;color:var(--ink-3);cursor:pointer;padding:0;display:inline-grid;place-items:center;line-height:1;}
+    .v-tagchip button:hover{color:#e05a5a;}
+    .v-tag-add{flex:1;min-width:90px;}
+    .v-cred{display:flex;flex-direction:column;gap:5px;}
+    .v-cred-row{display:flex;align-items:center;gap:6px;}
+    .v-cred-row .v-input{flex:1;}
+    .v-cred-badge{font-family:var(--mono);font-size:8.5px;text-transform:uppercase;letter-spacing:.04em;padding:1px 5px;border-radius:4px;white-space:nowrap;}
+    .v-cred-badge.set{color:#3fa46b;border:1px solid rgba(63,164,107,.5);background:rgba(63,164,107,.12);}
+    .v-cred-badge.unset{color:var(--ink-3);border:1px solid var(--rule);background:var(--panel-3);}
+    .v-cred-set{display:flex;flex-direction:column;gap:6px;padding:7px 8px;border:1px dashed var(--accent-glow);border-radius:var(--radius-sm);}
+    .v-set-foot{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding-top:6px;border-top:1px solid var(--rule);}
+    .v-set-dirty{font-size:11px;color:var(--accent);}
+    .v-set-err{font-size:11px;color:#e05a5a;word-break:break-word;flex-basis:100%;}
+    .v-rule-row{display:flex;gap:6px;align-items:center;}
+    .v-rule-row .v-select{flex:0 0 36%;}
+    .v-rule-row .v-input{flex:1;}
+    .v-raw-note{font-size:10.5px;color:var(--ink-3);}
     `;
     const style = document.createElement("style");
     style.id = "ch-views-style";
@@ -2063,6 +2111,644 @@
     },
   });
 
+  // ══ Settings view (Phase 4) ══════════════════════════════════════════════
+  // A schema-driven, editable form of the harness's `crewhaus.yaml` spec. The
+  // host reads the spec + `zodToJsonSchema(Spec)` and sends both; this view
+  // renders grouped, collapsible blocks (agent / tools / permissions /
+  // mcp_servers / memory / continuity / budget / observability / …). Credential-
+  // shaped fields render as `$VAR` refs with a separate "set value" affordance —
+  // the real value goes to `.env` via `secret_set`, never into the spec or the
+  // browser. `tool_config` is opaque → raw JSON. Edits are collected as a delta
+  // and sent as `spec_patch`; the host applies + validates + writes back, then
+  // recompiles/resumes.
+
+  const SET_BLOCKS = [
+    { key: "agent", title: "Agent", icon: "bot", open: true },
+    { key: "tools", title: "Tools", icon: "wrench" },
+    { key: "tool_config", title: "Tool config", icon: "wrench" },
+    { key: "permissions", title: "Permissions", icon: "shield" },
+    { key: "mcp_servers", title: "MCP servers", icon: "plug" },
+    { key: "memory", title: "Memory", icon: "database" },
+    { key: "continuity", title: "Continuity", icon: "git" },
+    { key: "thredz", title: "Thredz", icon: "network" },
+    { key: "learning", title: "Learning", icon: "sparkles" },
+    { key: "budget", title: "Budget", icon: "coins" },
+    { key: "compaction", title: "Compaction", icon: "scissors" },
+    { key: "security", title: "Security", icon: "shield" },
+    { key: "failure_taxonomy", title: "Failure taxonomy", icon: "alert" },
+    { key: "observability", title: "Observability", icon: "activity" },
+    { key: "feedback", title: "Feedback", icon: "thumbsUp" },
+  ];
+  // Top-level keys shown read-only in the header (or never edited via the form).
+  const SET_HEADER_KEYS = new Set(["name", "version", "target"]);
+  const LONG_TEXT_RE = /(instruction|prompt|description|justification|readme|note)/i;
+  const CRED_KEY_RE = /(^|[._-])(api[_-]?key|apikey|secret|token|password|passwd|authorization|bearer|access[_-]?key|private[_-]?key)$/i;
+
+  // ── Pure helpers (DOM-free) ──────────────────────────────────────────────
+  function isRef(v) {
+    return typeof v === "string" && /^\$[A-Z_][A-Z0-9_]*$/.test(v);
+  }
+  /** A credential-shaped leaf: a `$VAR` ref, a secret-ish key name, or a value
+      sitting under an mcp `env`/`headers` map. Such fields never carry a raw
+      value in the spec/browser — only a ref + a separate "set value". */
+  function isCredentialField(path, key, value) {
+    if (isRef(value)) return true;
+    if (typeof value !== "string") return false;
+    if (CRED_KEY_RE.test(String(key))) return true;
+    return path.some((seg) => seg === "env" || seg === "headers");
+  }
+  function getAtPath(obj, path) {
+    let cur = obj;
+    for (const seg of path) {
+      if (cur == null || typeof cur !== "object") return undefined;
+      cur = cur[seg];
+    }
+    return cur;
+  }
+  function hasAtPath(obj, path) {
+    let cur = obj;
+    for (const seg of path) {
+      if (cur == null || typeof cur !== "object" || !(seg in cur)) return false;
+      cur = cur[seg];
+    }
+    return true;
+  }
+  function deepEqual(a, b) {
+    if (a === b) return true;
+    if (typeof a !== typeof b) return false;
+    if (a && b && typeof a === "object") {
+      if (Array.isArray(a) !== Array.isArray(b)) return false;
+      const ka = Object.keys(a);
+      const kb = Object.keys(b);
+      if (ka.length !== kb.length) return false;
+      return ka.every((k) => deepEqual(a[k], b[k]));
+    }
+    return false;
+  }
+  function clone(v) {
+    return v == null ? v : JSON.parse(JSON.stringify(v));
+  }
+  /** Best-effort walk of a `zodToJsonSchema` output to the node at `path`, so a
+      leaf can pick up an `enum`/`description`/`type`. Tolerant of the union/
+      properties/items/additionalProperties shapes; null → value inference. */
+  function pickTargetSchema(schema, target) {
+    if (!schema || typeof schema !== "object") return null;
+    const branches = schema.anyOf || schema.oneOf;
+    if (Array.isArray(branches)) {
+      const found = branches.find(
+        (b) =>
+          b &&
+          b.properties &&
+          b.properties.target &&
+          ((b.properties.target.const === target) ||
+            (Array.isArray(b.properties.target.enum) && b.properties.target.enum.includes(target))),
+      );
+      return found || null;
+    }
+    return schema.properties ? schema : null;
+  }
+  function schemaAt(node, path) {
+    let cur = node;
+    for (const seg of path) {
+      if (!cur || typeof cur !== "object") return null;
+      const branches = cur.anyOf || cur.oneOf;
+      if (cur.properties && cur.properties[seg]) cur = cur.properties[seg];
+      else if (Array.isArray(branches)) {
+        const b = branches.find((x) => x && x.properties && x.properties[seg]);
+        cur = b ? b.properties[seg] : null;
+      } else if (cur.additionalProperties && typeof cur.additionalProperties === "object")
+        cur = cur.additionalProperties;
+      else if (cur.items) cur = cur.items;
+      else return null;
+    }
+    return cur || null;
+  }
+  function enumOf(schemaNode) {
+    if (!schemaNode) return null;
+    if (Array.isArray(schemaNode.enum)) return schemaNode.enum.filter((v) => typeof v === "string");
+    const branches = schemaNode.anyOf || schemaNode.oneOf;
+    if (Array.isArray(branches)) {
+      const consts = branches.map((b) => b && b.const).filter((c) => typeof c === "string");
+      if (consts.length === branches.length && consts.length) return consts;
+    }
+    return null;
+  }
+
+  // ── The view ─────────────────────────────────────────────────────────────
+  function mountSettings(el, api) {
+    API = api;
+    ensureStyles();
+    const wrap = CH.el("div", { class: "v-settings panel-view" });
+    el.appendChild(wrap);
+    const st = {
+      orig: null,
+      written: null,
+      schema: null,
+      target: "cli",
+      refs: {},
+      envPath: "",
+      launch: { mode: "compiled", canResume: false },
+      dirty: new Map(),
+      saving: false,
+      openGroups: new Set(),
+    };
+    let footEls = null;
+
+    function pathKey(path) {
+      return path.join(" ");
+    }
+    function setChange(path, value) {
+      const key = pathKey(path);
+      if (deepEqual(value, getAtPath(st.orig, path))) st.dirty.delete(key);
+      else st.dirty.set(key, { path, value });
+      refreshFoot();
+    }
+    function setRemove(path) {
+      st.dirty.set(pathKey(path), { path, remove: true });
+      refreshFoot();
+    }
+    function save() {
+      const changes = [...st.dirty.values()];
+      if (!changes.length || st.saving) return;
+      st.saving = true;
+      refreshFoot();
+      api.conn.send({ type: "spec_patch", target: st.target, changes });
+    }
+
+    // ── Reload / responses ───────────────────────────────────────────────
+    function reload() {
+      CH.clear(wrap);
+      wrap.appendChild(empty("Loading settings…"));
+      footEls = null;
+      api.conn.send({ type: "spec_get" });
+    }
+    function onSpecData(m) {
+      if (!m || m.ok === false) return renderUnavailable(m || {});
+      st.orig = m.spec || {};
+      st.written = m.written || null;
+      st.schema = m.schema ? pickTargetSchema(m.schema, m.target) : null;
+      st.target = m.target || "cli";
+      st.refs = m.refs || {};
+      st.envPath = m.envPath || "";
+      st.launch = m.launch || { mode: "compiled", canResume: false };
+      st.dirty = new Map();
+      render();
+    }
+    function onPatchResult(m) {
+      st.saving = false;
+      if (m && m.ok) {
+        const note =
+          m.recompile === "interpreter"
+            ? m.resumed
+              ? "Saved — recompiled and resumed the session."
+              : "Saved — the interpreter will pick up the change on next run."
+            : m.note || "Saved.";
+        CH.toast(note);
+        reload(); // re-fetch the now-canonical spec + clear dirty
+      } else {
+        if (footEls) {
+          footEls.err.textContent = (m && m.error) || "The edit was rejected.";
+          refreshFoot();
+        } else {
+          CH.toast((m && m.error) || "The edit was rejected.", "err");
+        }
+      }
+    }
+    function onSecretResult(m) {
+      if (!m || !m.key) return;
+      if (m.ok) {
+        st.refs[m.key] = true;
+        CH.toast(`Secret ${m.key} written${m.refWritten ? " and referenced" : ""}.`);
+        // Reflect the new set/unset state without a full reload.
+        wrap.querySelectorAll(`[data-refkey="${cssEscape(m.key)}"]`).forEach((b) => {
+          b.className = "v-cred-badge set";
+          b.textContent = "set";
+        });
+      } else {
+        CH.toast(m.error || "Could not write the secret.", "err");
+      }
+    }
+
+    api.on("spec_data", onSpecData);
+    api.on("spec_patch_result", onPatchResult);
+    api.on("secret_set_result", onSecretResult);
+
+    function renderUnavailable(m) {
+      CH.clear(wrap);
+      wrap.appendChild(empty(m.error || "Settings are unavailable for this harness."));
+      if (m.needsInstall) {
+        wrap.appendChild(
+          CH.el(
+            "button",
+            { class: "btn ghost sm", onClick: reload },
+            [CH.icon("download", 13), CH.el("span", { text: "Install spec tooling & retry" })],
+          ),
+        );
+      } else {
+        wrap.appendChild(
+          CH.el("button", { class: "btn ghost sm", onClick: reload }, [
+            CH.icon("refresh", 13),
+            CH.el("span", { text: "Retry" }),
+          ]),
+        );
+      }
+    }
+
+    // ── Rendering ─────────────────────────────────────────────────────────
+    function render() {
+      CH.clear(wrap);
+      const spec = st.orig || {};
+      // Header
+      const head = CH.el("div", { class: "v-set-head" }, [
+        CH.el("span", { class: "v-set-tag", text: st.target }),
+        CH.el("span", {
+          class: `v-set-tag mode-${st.launch.mode}`,
+          text: st.launch.mode === "interpreter" ? "live edit · resume" : "compiled",
+          title:
+            st.launch.mode === "interpreter"
+              ? "Interpreter launch: edits recompile-free and the session resumes on save."
+              : "Compiled bundle: install the crewhaus CLI for live edit + seamless resume.",
+        }),
+        typeof spec.name === "string" ? CH.el("span", { class: "v-field-key", text: spec.name }) : null,
+        CH.el("span", { class: "grow" }),
+        CH.el("button", { class: "btn ghost sm icon-only", title: "Reload spec", onClick: reload }, CH.icon("refresh", 13)),
+      ]);
+      wrap.appendChild(head);
+
+      const groups = CH.el("div", { class: "v-set-groups" });
+      wrap.appendChild(groups);
+
+      const rendered = new Set(SET_HEADER_KEYS);
+      for (const b of SET_BLOCKS) {
+        if (!(b.key in spec)) continue;
+        rendered.add(b.key);
+        groups.appendChild(blockGroup(b, spec[b.key]));
+      }
+      // Any remaining top-level keys the curated list didn't cover.
+      for (const k of Object.keys(spec)) {
+        if (rendered.has(k)) continue;
+        groups.appendChild(blockGroup({ key: k, title: k, icon: "dot" }, spec[k]));
+      }
+      if (!groups.firstChild) groups.appendChild(empty("This spec has no editable blocks."));
+
+      // Footer (save bar)
+      const dirtyLabel = CH.el("span", { class: "v-set-dirty" });
+      const saveBtn = CH.el("button", { class: "btn primary sm", onClick: save }, [
+        CH.icon("check", 13),
+        CH.el("span", { text: "Save changes" }),
+      ]);
+      const err = CH.el("span", { class: "v-set-err" });
+      wrap.appendChild(CH.el("div", { class: "v-set-foot" }, [saveBtn, dirtyLabel, err]));
+      footEls = { saveBtn, dirtyLabel, err };
+      refreshFoot();
+    }
+
+    function refreshFoot() {
+      if (!footEls) return;
+      const n = st.dirty.size;
+      footEls.dirtyLabel.textContent = n ? `${n} unsaved change${n === 1 ? "" : "s"}` : "";
+      const sp = footEls.saveBtn.querySelector("span");
+      if (sp) sp.textContent = st.saving ? "Saving…" : "Save changes";
+      footEls.saveBtn.disabled = st.saving || n === 0;
+      if (n === 0) footEls.err.textContent = "";
+    }
+
+    function blockGroup(meta, value) {
+      const body = CH.el("div", { class: "v-group-body" });
+      const caret = CH.el("span", { class: "v-group-caret" }, CH.icon("chevron", 13));
+      const groupEl = CH.el("div", { class: "v-group" }, [
+        CH.el("div", { class: "v-group-head" }, [
+          CH.icon(meta.icon || "dot", 14),
+          CH.el("span", { class: "v-group-title", text: meta.title }),
+          caret,
+        ]),
+        body,
+      ]);
+      const openKey = meta.key;
+      const startOpen = meta.open || st.openGroups.has(openKey);
+      if (startOpen) groupEl.classList.add("open");
+      groupEl.querySelector(".v-group-head").addEventListener("click", () => {
+        const nowOpen = groupEl.classList.toggle("open");
+        if (nowOpen) st.openGroups.add(openKey);
+        else st.openGroups.delete(openKey);
+      });
+      // Body content by block kind.
+      if (meta.key === "permissions" && value && typeof value === "object" && !Array.isArray(value)) {
+        renderPermissions(body, value);
+      } else if (meta.key === "tools" && Array.isArray(value)) {
+        renderStringArray(body, ["tools"], value);
+      } else if (meta.key === "tool_config") {
+        renderRawJson(body, ["tool_config"], value, "Opaque per-tool config — edited as raw JSON.");
+      } else if (Array.isArray(value)) {
+        // Whole-array blocks (failure_taxonomy, model_tiers, …).
+        if (value.every((x) => typeof x === "string")) renderStringArray(body, [meta.key], value);
+        else renderRawJson(body, [meta.key], value, "Edited as a whole array (no per-item paths in spec-patch).");
+      } else if (value && typeof value === "object") {
+        renderObject(body, [meta.key], value, 0);
+      } else {
+        renderLeaf(body, [meta.key], meta.key, value);
+      }
+      return groupEl;
+    }
+
+    // Recursive object renderer (depth-guarded; deep/opaque → raw JSON).
+    function renderObject(container, basePath, obj, depth) {
+      const keys = Object.keys(obj || {});
+      if (!keys.length) {
+        container.appendChild(hint("(empty)"));
+        return;
+      }
+      for (const k of keys) {
+        const path = basePath.concat(k);
+        const v = obj[k];
+        if (isCredentialField(path, k, v)) {
+          renderCredential(container, path, k, v);
+        } else if (Array.isArray(v)) {
+          const label = CH.el("div", { class: "v-field-label" }, [CH.el("span", { class: "v-field-key", text: k })]);
+          container.appendChild(label);
+          if (v.every((x) => typeof x === "string")) renderStringArray(container, path, v);
+          else renderRawJson(container, path, v, "whole-array replace");
+        } else if (v && typeof v === "object") {
+          if (depth >= 3) {
+            const label = CH.el("div", { class: "v-field-label" }, [CH.el("span", { class: "v-field-key", text: k })]);
+            container.appendChild(label);
+            renderRawJson(container, path, v, "nested — edited as raw JSON");
+          } else {
+            const sub = CH.el("div", { class: "v-sub" });
+            container.appendChild(CH.el("div", { class: "v-sub-label", text: k }));
+            container.appendChild(sub);
+            renderObject(sub, path, v, depth + 1);
+          }
+        } else {
+          renderLeaf(container, path, k, v);
+        }
+      }
+    }
+
+    function fieldLabel(path, key) {
+      const kids = [CH.el("span", { class: "v-field-key", text: key })];
+      // Mark a value that isn't in the as-written spec (i.e. a Zod default).
+      if (st.written && !hasAtPath(st.written, path)) kids.push(CH.el("span", { class: "v-field-def", text: "default" }));
+      return CH.el("div", { class: "v-field-label" }, kids);
+    }
+
+    function renderLeaf(container, path, key, value) {
+      const schemaNode = st.schema ? schemaAt(st.schema, path) : null;
+      const field = CH.el("div", { class: "v-field" });
+      field.appendChild(fieldLabel(path, key));
+      const en = enumOf(schemaNode);
+      if (typeof value === "boolean") {
+        const cb = CH.el("input", { type: "checkbox" });
+        cb.checked = value;
+        cb.addEventListener("change", () => setChange(path, cb.checked));
+        field.appendChild(CH.el("label", { class: "v-check" }, [cb, CH.el("span", { text: "enabled" })]));
+      } else if (en) {
+        const sel = CH.el("select", { class: "v-select" });
+        for (const opt of en) sel.appendChild(CH.el("option", { value: opt, text: opt }));
+        sel.value = value == null ? "" : String(value);
+        sel.addEventListener("change", () => setChange(path, sel.value));
+        field.appendChild(sel);
+      } else if (typeof value === "number") {
+        const inp = CH.el("input", { class: "v-input", type: "number", value: String(value) });
+        inp.addEventListener("change", () => {
+          const n = inp.value.trim() === "" ? null : Number(inp.value);
+          setChange(path, Number.isNaN(n) ? inp.value : n);
+        });
+        field.appendChild(inp);
+      } else if (typeof value === "string" && (LONG_TEXT_RE.test(key) || value.length > 80)) {
+        const ta = CH.el("textarea", { class: "v-textarea", rows: 4 });
+        ta.value = value;
+        ta.addEventListener("change", () => setChange(path, ta.value));
+        field.appendChild(ta);
+      } else if (value == null || typeof value === "string" || typeof value === "number") {
+        const inp = CH.el("input", { class: "v-input", type: "text", value: value == null ? "" : String(value) });
+        inp.addEventListener("change", () => setChange(path, inp.value));
+        field.appendChild(inp);
+      } else {
+        renderRawJson(field, path, value, "raw JSON");
+      }
+      container.appendChild(field);
+    }
+
+    function renderCredential(container, path, key, value) {
+      const field = CH.el("div", { class: "v-field v-cred" });
+      field.appendChild(fieldLabel(path, key));
+      const refInput = CH.el("input", {
+        class: "v-input",
+        type: "text",
+        placeholder: "$VAR_NAME",
+        value: typeof value === "string" ? value : "",
+      });
+      const refName = () => (isRef(refInput.value.trim()) ? refInput.value.trim().slice(1) : "");
+      const badge = CH.el("span", { class: "v-cred-badge unset", text: "unset" });
+      function syncBadge() {
+        const rn = refName();
+        const set = !!(rn && st.refs[rn]);
+        badge.className = `v-cred-badge ${set ? "set" : "unset"}`;
+        badge.textContent = set ? "set" : rn ? "unset" : "no ref";
+        badge.dataset.refkey = rn || "";
+      }
+      refInput.addEventListener("input", () => {
+        setChange(path, refInput.value.trim());
+        syncBadge();
+      });
+      const setBtn = CH.el(
+        "button",
+        { class: "btn ghost sm", title: "Write the real value to .env" },
+        [CH.icon("shield", 12), CH.el("span", { text: "Set value" })],
+      );
+      const setterHost = CH.el("div", {});
+      setBtn.addEventListener("click", () => {
+        if (setterHost.firstChild) {
+          CH.clear(setterHost);
+          return;
+        }
+        const rn = refName();
+        if (!rn) {
+          CH.toast("Enter a $VAR reference first (e.g. $OPENAI_API_KEY).", "err");
+          return;
+        }
+        const valInput = CH.el("input", { class: "v-input", type: "password", placeholder: `value for ${rn}`, autocomplete: "off" });
+        const pathInput = CH.el("input", { class: "v-input", type: "text", value: st.envPath, title: ".env target path" });
+        const saveVal = CH.el("button", { class: "btn primary sm" }, "Save to .env");
+        saveVal.addEventListener("click", () => {
+          const v = valInput.value;
+          if (!v) {
+            CH.toast("Enter a value.", "err");
+            return;
+          }
+          api.conn.send({
+            type: "secret_set",
+            key: rn,
+            value: v,
+            path: pathInput.value.trim() || undefined,
+            specPath: path,
+          });
+          valInput.value = ""; // never keep the secret around in the DOM
+          CH.clear(setterHost);
+        });
+        CH.clear(setterHost);
+        setterHost.appendChild(
+          CH.el("div", { class: "v-cred-set" }, [
+            CH.el("div", { class: "v-field-label" }, [CH.el("span", { class: "v-field-key", text: `value → ${rn}` })]),
+            valInput,
+            CH.el("div", { class: "v-field-label" }, [CH.el("span", { text: ".env path" })]),
+            pathInput,
+            saveVal,
+            CH.el("div", { class: "v-raw-note", text: "Stored in .env (0600), never in the spec or shown here." }),
+          ]),
+        );
+      });
+      field.appendChild(CH.el("div", { class: "v-cred-row" }, [refInput, badge, setBtn]));
+      field.appendChild(setterHost);
+      syncBadge();
+      container.appendChild(field);
+    }
+
+    // Editable list of strings → a whole-array replace at `path`.
+    function renderStringArray(container, path, arr) {
+      const work = Array.isArray(arr) ? arr.slice() : [];
+      const box = CH.el("div", { class: "v-tags" });
+      const addInput = CH.el("input", { class: "v-input v-tag-add", type: "text", placeholder: "add…" });
+      function commit() {
+        setChange(path, work.slice());
+      }
+      function draw() {
+        CH.clear(box);
+        work.forEach((item, i) => {
+          box.appendChild(
+            CH.el("span", { class: "v-tagchip" }, [
+              CH.el("span", { text: String(item) }),
+              CH.el(
+                "button",
+                {
+                  title: "remove",
+                  onClick: () => {
+                    work.splice(i, 1);
+                    draw();
+                    commit();
+                  },
+                },
+                CH.icon("x", 11),
+              ),
+            ]),
+          );
+        });
+        box.appendChild(addInput);
+      }
+      addInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          const v = addInput.value.trim();
+          if (v) {
+            work.push(v);
+            addInput.value = "";
+            draw();
+            commit();
+          }
+        }
+      });
+      draw();
+      container.appendChild(box);
+    }
+
+    // Structured permissions editor (mode select + whole-array rules).
+    function renderPermissions(container, perms) {
+      const modeSchema = st.schema ? schemaAt(st.schema, ["permissions", "mode"]) : null;
+      const modes = enumOf(modeSchema) || ["default", "plan", "auto"];
+      const modeField = CH.el("div", { class: "v-field" });
+      modeField.appendChild(fieldLabel(["permissions", "mode"], "mode"));
+      const sel = CH.el("select", { class: "v-select" });
+      for (const mopt of modes) sel.appendChild(CH.el("option", { value: mopt, text: mopt }));
+      sel.value = typeof perms.mode === "string" ? perms.mode : "default";
+      sel.addEventListener("change", () => setChange(["permissions", "mode"], sel.value));
+      modeField.appendChild(sel);
+      container.appendChild(modeField);
+
+      // rules — whole-array replace on any edit.
+      const rules = Array.isArray(perms.rules) ? clone(perms.rules) : [];
+      const listBox = CH.el("div", { class: "v-sub" });
+      container.appendChild(CH.el("div", { class: "v-sub-label", text: "rules" }));
+      container.appendChild(listBox);
+      const RULE_TYPES = ["alwaysAllow", "alwaysAsk", "alwaysDeny"];
+      function commitRules() {
+        setChange(["permissions", "rules"], clone(rules));
+      }
+      function drawRules() {
+        CH.clear(listBox);
+        rules.forEach((r, i) => {
+          const typeSel = CH.el("select", { class: "v-select" });
+          for (const t of RULE_TYPES) typeSel.appendChild(CH.el("option", { value: t, text: t }));
+          typeSel.value = r.type || "alwaysAsk";
+          typeSel.addEventListener("change", () => {
+            rules[i].type = typeSel.value;
+            commitRules();
+          });
+          const pat = CH.el("input", { class: "v-input", type: "text", placeholder: "pattern", value: r.pattern || "" });
+          pat.addEventListener("change", () => {
+            rules[i].pattern = pat.value;
+            commitRules();
+          });
+          const del = CH.el(
+            "button",
+            { class: "btn ghost sm icon-only", title: "remove rule", onClick: () => {
+              rules.splice(i, 1);
+              drawRules();
+              commitRules();
+            } },
+            CH.icon("x", 12),
+          );
+          listBox.appendChild(CH.el("div", { class: "v-rule-row" }, [typeSel, pat, del]));
+        });
+        listBox.appendChild(
+          CH.el("button", { class: "btn ghost sm", onClick: () => {
+            rules.push({ type: "alwaysAsk", pattern: "" });
+            drawRules();
+          } }, [CH.icon("check", 12), CH.el("span", { text: "Add rule" })]),
+        );
+      }
+      drawRules();
+
+      // Any other permissions keys (rarely present) rendered generically.
+      for (const k of Object.keys(perms)) {
+        if (k === "mode" || k === "rules") continue;
+        renderObject(container, ["permissions"], { [k]: perms[k] }, 1);
+      }
+    }
+
+    function renderRawJson(container, path, value, note) {
+      const wrapEl = CH.el("div", { class: "v-field" });
+      const ta = CH.el("textarea", { class: "v-textarea", rows: 6, spellcheck: "false" });
+      ta.value = JSON.stringify(value == null ? null : value, null, 2);
+      const errEl = CH.el("div", { class: "v-set-err" });
+      ta.addEventListener("input", () => {
+        try {
+          const parsed = JSON.parse(ta.value);
+          errEl.textContent = "";
+          setChange(path, parsed);
+        } catch (e) {
+          errEl.textContent = `invalid JSON: ${e.message}`;
+        }
+      });
+      wrapEl.appendChild(ta);
+      if (note) wrapEl.appendChild(CH.el("div", { class: "v-raw-note", text: note }));
+      wrapEl.appendChild(errEl);
+      container.appendChild(wrapEl);
+    }
+
+    reload();
+    el._settingsReload = reload;
+  }
+
+  P.register({
+    id: "settings",
+    title: "Settings",
+    icon: "shield",
+    order: 40,
+    feature: P.VIEW_FEATURES.settings,
+    mount: mountSettings,
+  });
+
   // ── Chat-link matchers (requirement 4) ───────────────────────────────────
   // Images/data files the default matcher misses → the files viewer.
   P.linkify(EXTRA_FILE_RE, (m) => ({ view: "files", arg: { path: m[0] } }));
@@ -2113,6 +2799,15 @@
     collectCompactions,
     normalizePlanId,
     NOMINAL_CONTEXT_WINDOW,
+    // Phase 4 settings helpers (DOM-free).
+    isRef,
+    isCredentialField,
+    getAtPath,
+    hasAtPath,
+    deepEqual,
+    pickTargetSchema,
+    schemaAt,
+    enumOf,
     _taskNames: taskNames,
   };
 })();

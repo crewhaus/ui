@@ -25,6 +25,7 @@ import { spawn } from "bun";
 import { randomBytes } from "node:crypto";
 import {
   appendFileSync,
+  chmodSync,
   existsSync,
   mkdirSync,
   readdirSync,
@@ -33,7 +34,7 @@ import {
   watch,
   writeFileSync,
 } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 
 // -- Types --------------------------------------------------------------------
 
@@ -155,6 +156,34 @@ function findHarnessRoot(harnessDir: string): string {
     d = parent;
   }
   return resolve(harnessDir);
+}
+
+/** The harness spec file (`crewhaus.yaml`/`.yml`) at the harness root, or null.
+ *  Its presence is what makes the interpreter launch (Path B) + settings view
+ *  possible — a bare compiled bundle has no spec to re-read or edit. */
+export function findSpecPath(harnessRoot: string): string | null {
+  for (const f of ["crewhaus.yaml", "crewhaus.yml"]) {
+    const p = join(harnessRoot, f);
+    if (existsSync(p)) return p;
+  }
+  return null;
+}
+
+/** Resolve a runnable `crewhaus` CLI for the interpreter launch (Path B):
+ *  the harness's own `.bin/crewhaus` first (version-matched to its deps), then
+ *  a global `crewhaus` on PATH. `bunx crewhaus` is the last-resort fallback the
+ *  spawn uses when this returns null but a spec is present (see selectLaunch).
+ *  null ⇒ no local/global CLI, so the host stays on the compiled bundle. */
+export function resolveCrewhausBin(harnessRoot: string): string | null {
+  const local = join(harnessRoot, "node_modules", ".bin", "crewhaus");
+  if (existsSync(local)) return local;
+  try {
+    const w = Bun.which("crewhaus");
+    if (w) return w;
+  } catch {
+    /* Bun.which unavailable — fall through */
+  }
+  return null;
 }
 
 /**
@@ -493,6 +522,272 @@ export function exitStatusExtra(
   return extra;
 }
 
+// -- Settings: spec write-back + secrets + launch modes (Phase 4) -------------
+//
+// The settings view edits a harness's `crewhaus.yaml`. The host owns the write
+// path: it dynamically imports `@crewhaus/spec` (`Spec`/`parseSpec`) and
+// `@crewhaus/spec-patch` (`applySpecPatch`/`specHasPath`) resolved against the
+// HARNESS's node_modules — version-matched to the running bundle — turns the
+// form's field deltas into `SpecPatch`es, applies them (comment/key-order
+// preserving, validated through `parseSpec`), and writes the YAML back. Secret
+// VALUES never enter the spec or the browser: a `$VAR` ref goes in the spec and
+// the real value is written to a `.env` the host loads. The helpers below are
+// pure + dependency-injected so they unit-test without the packages installed.
+
+/** A single field edit from the settings form. `remove` deletes the path;
+ *  otherwise `value` is the new value. Because `@crewhaus/spec-patch` has no
+ *  array-index paths, arrays it cannot index (permissions.rules, tools,
+ *  mcp_servers, failure_taxonomy) are edited as a WHOLE-BLOCK `value` at the
+ *  block path (a replace) — the same pattern the optimizer uses. */
+export type SpecChange = { path: string[]; value?: unknown; remove?: boolean };
+
+/** The `@crewhaus/spec-patch` `SpecPatch` record we build from a change. */
+export type SpecPatch = {
+  target: string;
+  path: string[];
+  op: "replace" | "add" | "remove";
+  value?: unknown;
+  rationale?: string;
+};
+
+/** Injected slice of `@crewhaus/spec` + `@crewhaus/spec-patch` (+ optional
+ *  `zod-to-json-schema`) resolved from the harness. */
+export type SpecTooling = {
+  Spec: unknown;
+  parseSpec: (yaml: string) => unknown;
+  applySpecPatch: (yaml: string, patch: SpecPatch) => { yaml: string; spec?: unknown };
+  specHasPath: (yaml: string, path: string[]) => boolean;
+  zodToJsonSchema: ((schema: unknown, opts?: unknown) => unknown) | null;
+};
+
+/** Env var name accepted for a `$VAR` ref — the compiler's ENV_REF_RE charset
+ *  (`lowerSecret`/`lowerCredential`), so a value we write round-trips as a ref. */
+export const ENV_KEY_RE = /^[A-Z_][A-Z0-9_]*$/;
+
+/** Build the `SpecPatch` for one change: `remove` → remove; else add-vs-replace
+ *  is decided by whether the path is already `present` in the document text
+ *  (Zod-defaulted-but-unwritten fields are absent → `add`). Pure. */
+export function buildSpecPatch(target: string, change: SpecChange, present: boolean): SpecPatch {
+  if (!Array.isArray(change.path) || change.path.length === 0)
+    throw new Error("spec change: a non-empty path is required");
+  if (change.remove) return { target, path: [...change.path], op: "remove" };
+  return {
+    target,
+    path: [...change.path],
+    op: present ? "replace" : "add",
+    value: change.value,
+    rationale: "settings edit (crewhaus UI)",
+  };
+}
+
+/**
+ * Turn a batch of form changes into applied YAML. Each change's add-vs-replace
+ * is decided against the CURRENT working YAML (via the injected `specHasPath`,
+ * so a path added by an earlier change is seen by a later one) and applied with
+ * the injected `applySpecPatch`, threading the YAML forward. `applySpecPatch`
+ * re-validates through `parseSpec` on every step and THROWS on an invalid edit,
+ * so one bad change rejects the whole batch and the caller writes nothing.
+ * Pure + dependency-injected → unit-testable without the real packages.
+ */
+export function applySpecChanges(
+  rawYaml: string,
+  target: string,
+  changes: readonly SpecChange[],
+  deps: Pick<SpecTooling, "applySpecPatch" | "specHasPath">,
+): { yaml: string; patches: SpecPatch[] } {
+  let yaml = rawYaml;
+  const patches: SpecPatch[] = [];
+  for (const c of changes) {
+    const present = c.remove ? true : deps.specHasPath(yaml, c.path);
+    const patch = buildSpecPatch(target, c, present);
+    const res = deps.applySpecPatch(yaml, patch);
+    yaml = res.yaml;
+    patches.push(patch);
+  }
+  return { yaml, patches };
+}
+
+/**
+ * Resolve the target `.env` path for a secret write. Default (no `path`) is
+ * `<harnessRoot>/.env` — the `harness/.env` beside `crewhaus.yaml` that
+ * `loadEnvChain` reads. An explicit ABSOLUTE path is honoured as user-owned
+ * (secrets may live in a shared/parent `.env` outside the repo). A RELATIVE
+ * path is resolved under `harnessRoot` and MUST stay inside it (no traversal).
+ * Returns null when the path is denied.
+ */
+export function resolveEnvPath(harnessRoot: string, path?: string | null): string | null {
+  const root = resolve(harnessRoot);
+  if (path == null || path === "") return join(root, ".env");
+  if (typeof path !== "string" || path.includes("\0")) return null;
+  if (isAbsolute(path)) return resolve(path);
+  const full = resolve(root, path);
+  if (full !== root && !full.startsWith(root + sep)) return null;
+  return full;
+}
+
+/** Encode a dotenv value: a plain token charset is written raw; anything with
+ *  whitespace/`#`/quotes is double-quoted (so `parseEnvFile` strips it back). */
+function encodeEnvValue(v: string): string {
+  if (/^[A-Za-z0-9_\-.:/+=~@]*$/.test(v)) return v;
+  return `"${v.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+}
+
+/**
+ * Upsert `KEY=value` into a dotenv file's text, preserving every other line
+ * (comments, ordering, unrelated vars). Replaces an existing `KEY=` (or
+ * `export KEY=`) line in place; otherwise appends. Pure. */
+export function upsertEnvVar(existing: string, key: string, value: string): string {
+  const line = `${key}=${encodeEnvValue(value)}`;
+  const re = new RegExp(`^\\s*(?:export\\s+)?${key}\\s*=`);
+  const lines = existing === "" ? [] : existing.replace(/\n$/, "").split("\n");
+  let replaced = false;
+  for (let i = 0; i < lines.length; i++) {
+    if (re.test(lines[i])) {
+      lines[i] = line;
+      replaced = true;
+      break;
+    }
+  }
+  if (!replaced) lines.push(line);
+  return `${lines.join("\n")}\n`;
+}
+
+/** Presence (NOT value) of each `$VAR` the spec references, so the settings
+ *  view can badge a credential ref as set/unset. Names come from the spec the
+ *  user already sees; no secret value is ever read or returned. */
+export function envRefPresence(
+  yaml: string,
+  envChain: Record<string, string>,
+): Record<string, boolean> {
+  const out: Record<string, boolean> = {};
+  const re = /\$([A-Z_][A-Z0-9_]*)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(yaml))) {
+    const k = m[1];
+    out[k] = k in envChain || k in process.env;
+  }
+  return out;
+}
+
+/** Launch preference: config `launch` or `CREWHAUS_UI_LAUNCH` env, else auto. */
+export function launchPreference(
+  config: Record<string, unknown>,
+  env: Record<string, string | undefined>,
+): "auto" | "compiled" | "interpreter" {
+  const raw = env.CREWHAUS_UI_LAUNCH ?? (typeof config.launch === "string" ? config.launch : "");
+  return raw === "compiled" || raw === "interpreter" ? raw : "auto";
+}
+
+export type LaunchPlan = { mode: "interpreter" | "compiled"; argv: string[] };
+
+/**
+ * Choose how to spawn the harness (decision §10.1 — BOTH modes):
+ *   • Path B (interpreter) when a spec is present AND a runnable `crewhaus` CLI
+ *     exists: `crewhaus run <spec> [--resume <sessionId>]`, passed as an argv
+ *     ARRAY (never one interpolated string). The interpreter re-reads the spec
+ *     each start (free recompile) and resumes natively — the live-edit default.
+ *   • Path A (compiled) otherwise: `bun <entry>`. The compiled bundle cannot
+ *     resume (needs factory F3), so `--resume` is never added here.
+ * `prefer` ("compiled"/"interpreter") overrides the auto choice; interpreter is
+ * only honoured when it is actually available (spec + CLI), else it falls back
+ * to compiled. The `--resume <sessionId>` is threaded in only for a valid
+ * latched session id. Pure → unit-testable.
+ */
+export function selectLaunch(opts: {
+  specPath: string | null;
+  crewhausBin: string | null;
+  entryPath: string | null;
+  sessionId?: string | null;
+  resume?: boolean;
+  prefer?: "auto" | "compiled" | "interpreter";
+}): LaunchPlan {
+  const prefer = opts.prefer ?? "auto";
+  const canInterpret = !!(opts.specPath && opts.crewhausBin);
+  const useInterpreter = prefer === "compiled" ? false : canInterpret;
+  if (useInterpreter) {
+    const argv = [opts.crewhausBin as string, "run", opts.specPath as string];
+    if (opts.resume && typeof opts.sessionId === "string" && /^sess_[0-9a-f]{16}$/.test(opts.sessionId)) {
+      argv.push("--resume", opts.sessionId);
+    }
+    return { mode: "interpreter", argv };
+  }
+  return { mode: "compiled", argv: ["bun", opts.entryPath ?? ""] };
+}
+
+/** Dynamic import of `name` resolved as if imported from `fromDir` (the
+ *  harness node_modules). Throws a clear, UI-surfaceable error if unresolved. */
+async function importFromHarness(name: string, fromDir: string): Promise<Record<string, unknown>> {
+  let resolved: string;
+  try {
+    resolved = Bun.resolveSync(name, resolve(fromDir));
+  } catch {
+    throw new Error(
+      `${name} is not installed in the harness (node_modules) — it is required to read/edit the spec.`,
+    );
+  }
+  return (await import(resolved)) as Record<string, unknown>;
+}
+
+/**
+ * Load the spec tooling from the harness node_modules: `@crewhaus/spec` +
+ * `@crewhaus/spec-patch` (required) and `zod-to-json-schema` (optional — the
+ * form degrades to value-type inference without it). Throws a clear error if a
+ * required package is missing or shaped unexpectedly.
+ */
+export async function loadSpecTooling(fromDir: string): Promise<SpecTooling> {
+  const spec = await importFromHarness("@crewhaus/spec", fromDir);
+  const patch = await importFromHarness("@crewhaus/spec-patch", fromDir);
+  let zodToJsonSchema: SpecTooling["zodToJsonSchema"] = null;
+  try {
+    const z = await importFromHarness("zod-to-json-schema", fromDir);
+    const cand = (z.zodToJsonSchema ?? (z.default as Record<string, unknown> | undefined)?.zodToJsonSchema ?? z.default) as unknown;
+    if (typeof cand === "function") zodToJsonSchema = cand as SpecTooling["zodToJsonSchema"];
+  } catch {
+    /* optional — proceed without a JSON Schema */
+  }
+  if (typeof spec.parseSpec !== "function" || spec.Spec == null)
+    throw new Error("@crewhaus/spec did not export { Spec, parseSpec }.");
+  if (typeof patch.applySpecPatch !== "function" || typeof patch.specHasPath !== "function")
+    throw new Error("@crewhaus/spec-patch did not export { applySpecPatch, specHasPath }.");
+  return {
+    Spec: spec.Spec,
+    parseSpec: spec.parseSpec as SpecTooling["parseSpec"],
+    applySpecPatch: patch.applySpecPatch as SpecTooling["applySpecPatch"],
+    specHasPath: patch.specHasPath as SpecTooling["specHasPath"],
+    zodToJsonSchema,
+  };
+}
+
+/**
+ * Best-effort install of the spec tooling into the harness, version-matched to
+ * an already-installed `@crewhaus/*` (the compiled bundle's own deps) so the
+ * schema matches the running bundle. Non-fatal: a failure surfaces as the
+ * clear "not installed" error from {@link loadSpecTooling} on the retry.
+ */
+async function installSpecTooling(harnessDir: string, log: (l: string) => void): Promise<void> {
+  let ver = "latest";
+  const probe = join(harnessDir, "node_modules", "@crewhaus", "runtime-core", "package.json");
+  try {
+    if (existsSync(probe)) {
+      const v = JSON.parse(readFileSync(probe, "utf8")).version;
+      if (typeof v === "string" && v) ver = v;
+    }
+  } catch {
+    /* fall back to latest */
+  }
+  const specs = [`@crewhaus/spec@${ver}`, `@crewhaus/spec-patch@${ver}`, "zod-to-json-schema"];
+  log(`[settings] installing ${specs.join(", ")} for spec editing …`);
+  const proc = spawn(["bun", "add", ...specs], {
+    cwd: harnessDir,
+    stdout: "pipe",
+    stderr: "pipe",
+    env: process.env,
+  });
+  await streamLines(proc.stdout, (l) => log(`[settings] ${l}`));
+  await streamLines(proc.stderr, (l) => log(`[settings] ${l}`));
+  await proc.exited;
+}
+
 // -- Process supervisor -------------------------------------------------------
 
 type ClientMsg =
@@ -514,7 +809,15 @@ type ClientMsg =
       score?: number;
       comment?: string;
       correction?: string;
-    };
+    }
+  // Settings view (Phase 4). `spec_get` → the host reads `crewhaus.yaml`, builds
+  // `zodToJsonSchema(Spec)`, and broadcasts `{type:"spec_data", …}`. `spec_patch`
+  // → apply the form's field deltas, validate, write back, then recompile/resume.
+  // `secret_set` → write `KEY=value` to the chosen `.env` (never echoed) and,
+  // when a `specPath` is given, ensure the spec's `$KEY` ref at that path.
+  | { type: "spec_get" }
+  | { type: "spec_patch"; changes: SpecChange[]; target?: string }
+  | { type: "secret_set"; key: string; value: string; path?: string; specPath?: string[] };
 
 type Broadcast = (msg: unknown) => void;
 
@@ -540,6 +843,12 @@ export class Supervisor {
    * blanking. Reset on every start; capped by count to stay memory-bounded.
    */
   private eventRing: Record<string, unknown>[] = [];
+  /** Spec tooling (@crewhaus/spec + spec-patch), resolved from the harness on
+   *  first settings use and cached (import is idempotent per resolved path). */
+  private specTooling: SpecTooling | null = null;
+  /** Once a settings save has switched this run to the interpreter for live
+   *  edits, keep using it so subsequent restarts resume the same session. */
+  private liveEdit = false;
   daemonPort: number | null = null;
 
   constructor(
@@ -631,6 +940,15 @@ export class Supervisor {
         this.stop();
         await this.start();
         break;
+      case "spec_get":
+        await this.handleSpecGet();
+        break;
+      case "spec_patch":
+        await this.handleSpecPatch(msg);
+        break;
+      case "secret_set":
+        await this.handleSecretSet(msg);
+        break;
     }
   }
 
@@ -710,6 +1028,273 @@ export class Supervisor {
     }
   }
 
+  // ── Settings: spec read / patch / secret (Phase 4) ───────────────────────
+
+  /** Resolve the spec tooling from the harness node_modules, installing it
+   *  (version-matched) on first use if absent. Cached after the first success. */
+  private async getSpecTooling(): Promise<SpecTooling> {
+    if (this.specTooling) return this.specTooling;
+    try {
+      this.specTooling = await loadSpecTooling(this.harnessDir);
+      return this.specTooling;
+    } catch {
+      // Not resolvable yet — the compiled bundle doesn't import spec/spec-patch.
+      // Install them version-matched to the bundle's own @crewhaus/* and retry.
+      await installSpecTooling(this.harnessDir, (l) => this.log(l));
+      this.specTooling = await loadSpecTooling(this.harnessDir); // throws a clear error if still missing
+      return this.specTooling;
+    }
+  }
+
+  /** Read `crewhaus.yaml`, build `zodToJsonSchema(Spec)`, and broadcast the
+   *  form data. Never returns a secret VALUE — only `$VAR` ref presence. */
+  private async handleSpecGet(): Promise<void> {
+    const harnessRoot = findHarnessRoot(this.harnessDir);
+    const specPath = findSpecPath(harnessRoot);
+    if (!specPath) {
+      this.broadcast({
+        type: "spec_data",
+        ok: false,
+        error:
+          "No crewhaus.yaml found for this harness. The settings view edits a harness spec; a compiled-only bundle has none to show.",
+      });
+      return;
+    }
+    let tooling: SpecTooling;
+    try {
+      tooling = await this.getSpecTooling();
+    } catch (e) {
+      this.broadcast({ type: "spec_data", ok: false, needsInstall: true, error: (e as Error).message });
+      return;
+    }
+    try {
+      const yaml = readFileSync(specPath, "utf8");
+      const spec = tooling.parseSpec(yaml) as Record<string, unknown>; // effective (defaults); validates the file
+      const target = typeof spec.target === "string" ? spec.target : "cli";
+      // The as-written object (no defaults) lets the form distinguish user-set
+      // fields from defaulted ones. Best-effort — `yaml` is a spec dep.
+      let written: unknown = null;
+      try {
+        const y = await importFromHarness("yaml", this.harnessDir);
+        if (typeof y.parse === "function") written = (y.parse as (s: string) => unknown)(yaml);
+      } catch {
+        /* no yaml lib — form falls back to the effective spec */
+      }
+      let schema: unknown = null;
+      if (tooling.zodToJsonSchema) {
+        try {
+          schema = tooling.zodToJsonSchema(tooling.Spec, { $refStrategy: "none" });
+        } catch {
+          /* schema optional — form degrades to value-type inference */
+        }
+      }
+      const crewhausBin = resolveCrewhausBin(harnessRoot);
+      this.broadcast({
+        type: "spec_data",
+        ok: true,
+        target,
+        spec,
+        written,
+        schema,
+        refs: envRefPresence(yaml, loadEnvChain(harnessRoot)),
+        envPath: join(harnessRoot, ".env"),
+        launch: { mode: crewhausBin ? "interpreter" : "compiled", canResume: !!crewhausBin },
+      });
+    } catch (e) {
+      this.broadcast({ type: "spec_data", ok: false, error: `Could not read the spec: ${(e as Error).message}` });
+    }
+  }
+
+  /** Apply the form's field deltas to `crewhaus.yaml`, validate, write back,
+   *  then recompile + resume per the launch mode (decision §10.1). */
+  private async handleSpecPatch(msg: Extract<ClientMsg, { type: "spec_patch" }>): Promise<void> {
+    const harnessRoot = findHarnessRoot(this.harnessDir);
+    const specPath = findSpecPath(harnessRoot);
+    if (!specPath) {
+      this.broadcast({ type: "spec_patch_result", ok: false, error: "No crewhaus.yaml to edit." });
+      return;
+    }
+    const changes = Array.isArray(msg.changes) ? msg.changes : [];
+    if (!changes.length) {
+      this.broadcast({ type: "spec_patch_result", ok: false, error: "No changes to apply." });
+      return;
+    }
+    let tooling: SpecTooling;
+    try {
+      tooling = await this.getSpecTooling();
+    } catch (e) {
+      this.broadcast({ type: "spec_patch_result", ok: false, error: (e as Error).message });
+      return;
+    }
+    const raw = readFileSync(specPath, "utf8");
+    let target = typeof msg.target === "string" ? msg.target : "";
+    if (!target) {
+      try {
+        target = (tooling.parseSpec(raw) as { target?: string }).target ?? "cli";
+      } catch {
+        target = "cli";
+      }
+    }
+    let applied: { yaml: string; patches: SpecPatch[] };
+    try {
+      applied = applySpecChanges(raw, target, changes, tooling);
+    } catch (e) {
+      // A rejected edit (parseSpec inside applySpecPatch) — surface it, write nothing.
+      this.broadcast({ type: "spec_patch_result", ok: false, error: (e as Error).message });
+      return;
+    }
+    // Final belt-and-braces validation before touching disk.
+    try {
+      tooling.parseSpec(applied.yaml);
+    } catch (e) {
+      this.broadcast({ type: "spec_patch_result", ok: false, error: (e as Error).message });
+      return;
+    }
+    try {
+      writeFileSync(specPath, applied.yaml);
+    } catch (e) {
+      this.broadcast({ type: "spec_patch_result", ok: false, error: `Could not write the spec: ${(e as Error).message}` });
+      return;
+    }
+    await this.recompileAndResume(harnessRoot, applied.yaml, applied.patches.length);
+  }
+
+  /** After a spec save, restart the harness so the change takes effect and the
+   *  session picks back up. Path B (interpreter + `--resume`) is seamless; the
+   *  Path A fallback recompiles the bundle (no resume) or, absent a compiler,
+   *  saves the spec with an honest "recompile needed" message. */
+  private async recompileAndResume(harnessRoot: string, yaml: string, applied: number): Promise<void> {
+    const interpretable =
+      this.config.runClass === "stdio-interactive" || this.config.runClass === "stdio-oneshot";
+    const crewhausBin = interpretable ? resolveCrewhausBin(harnessRoot) : null;
+    if (interpretable && crewhausBin) {
+      // Path B — the interpreter re-reads the spec (free recompile) and resumes
+      // the same session natively. The latched sessionId drives `--resume`.
+      this.liveEdit = true;
+      this.broadcast({
+        type: "spec_patch_result",
+        ok: true,
+        applied,
+        recompile: "interpreter",
+        resumed: !!this.sessionId,
+        sessionId: this.sessionId,
+      });
+      if (this.proc) {
+        this.stop();
+        await this.start(undefined, { resume: true });
+      }
+      return;
+    }
+    // Path A — compiled fallback: try a programmatic recompile of the bundle.
+    let recompiled = false;
+    try {
+      recompiled = await this.recompileBundle(harnessRoot, yaml);
+    } catch (e) {
+      this.log(`[settings] recompile unavailable: ${(e as Error).message}`);
+    }
+    if (recompiled) {
+      this.broadcast({
+        type: "spec_patch_result",
+        ok: true,
+        applied,
+        recompile: "compiled",
+        resumed: false,
+        note: "Bundle recompiled; the session resets — compiled-bundle resume needs factory F3.",
+      });
+      if (this.proc) {
+        this.stop();
+        await this.start(); // no resume — compiled bundles can't resume yet (F3)
+      }
+      return;
+    }
+    this.broadcast({
+      type: "spec_patch_result",
+      ok: true,
+      applied,
+      recompile: "none",
+      resumed: false,
+      note:
+        "Spec saved. This harness runs a compiled bundle with no crewhaus CLI or @crewhaus/compiler available, so it can't be live-recompiled or resumed in-host. Install the crewhaus CLI for live edit + resume, or re-drop a freshly compiled bundle.",
+    });
+  }
+
+  /** Programmatically recompile the spec via `@crewhaus/compiler` and rewrite
+   *  the bundle files in place. Returns false if the compiler is unavailable
+   *  (the common Path A case) so the caller can fall back to a save-only note. */
+  private async recompileBundle(harnessRoot: string, yaml: string): Promise<boolean> {
+    let compiler: Record<string, unknown>;
+    try {
+      compiler = await importFromHarness("@crewhaus/compiler", this.harnessDir);
+    } catch {
+      return false;
+    }
+    if (typeof compiler.compile !== "function") return false;
+    const bundle = (compiler.compile as (y: string, o?: unknown) => unknown)(yaml, {}) as {
+      files?: { path: string; content: string }[];
+    };
+    if (!bundle || !Array.isArray(bundle.files)) return false;
+    const h = detectHarness(this.harnessDir, this.config);
+    const bundleDir = resolve(h.entry ? dirname(join(this.harnessDir, h.entry)) : this.harnessDir);
+    for (const f of bundle.files) {
+      if (!f || typeof f.path !== "string" || typeof f.content !== "string") continue;
+      const dest = resolve(bundleDir, f.path);
+      if (dest !== bundleDir && !dest.startsWith(bundleDir + sep)) continue; // no traversal
+      mkdirSync(dirname(dest), { recursive: true });
+      writeFileSync(dest, f.content);
+    }
+    return true;
+  }
+
+  /** Write a secret VALUE to the chosen `.env` (mode 0600) and, when a
+   *  `specPath` is given, ensure the spec's `$KEY` ref at that path. The VALUE
+   *  is never echoed back on any broadcast — only the key + env path + whether
+   *  a ref was written. */
+  private async handleSecretSet(msg: Extract<ClientMsg, { type: "secret_set" }>): Promise<void> {
+    const key = String(msg.key ?? "");
+    if (!ENV_KEY_RE.test(key)) {
+      this.broadcast({ type: "secret_set_result", ok: false, key, error: "Invalid env key (use A–Z, 0–9, _)." });
+      return;
+    }
+    const value = typeof msg.value === "string" ? msg.value : "";
+    if (/[\r\n]/.test(value)) {
+      this.broadcast({ type: "secret_set_result", ok: false, key, error: "A secret value must be a single line." });
+      return;
+    }
+    const harnessRoot = findHarnessRoot(this.harnessDir);
+    const envPath = resolveEnvPath(harnessRoot, typeof msg.path === "string" ? msg.path : null);
+    if (!envPath) {
+      this.broadcast({ type: "secret_set_result", ok: false, key, error: "Denied env path (traversal outside the harness)." });
+      return;
+    }
+    try {
+      const existing = existsSync(envPath) ? readFileSync(envPath, "utf8") : "";
+      writeFileSync(envPath, upsertEnvVar(existing, key, value), { mode: 0o600 });
+      chmodSync(envPath, 0o600); // enforce 0600 even if the file pre-existed
+    } catch (e) {
+      this.broadcast({ type: "secret_set_result", ok: false, key, error: `Could not write .env: ${(e as Error).message}` });
+      return;
+    }
+    // Ensure the spec references the secret as `$KEY` at the given path.
+    let refWritten = false;
+    if (Array.isArray(msg.specPath) && msg.specPath.length) {
+      try {
+        const specPath = findSpecPath(harnessRoot);
+        const tooling = await this.getSpecTooling();
+        if (specPath) {
+          const raw = readFileSync(specPath, "utf8");
+          const target = (tooling.parseSpec(raw) as { target?: string }).target ?? "cli";
+          const { yaml } = applySpecChanges(raw, target, [{ path: msg.specPath, value: `$${key}` }], tooling);
+          tooling.parseSpec(yaml);
+          writeFileSync(specPath, yaml);
+          refWritten = true;
+        }
+      } catch (e) {
+        this.log(`[settings] secret value written, but the $${key} ref could not be set: ${(e as Error).message}`);
+      }
+    }
+    this.broadcast({ type: "secret_set_result", ok: true, key, envPath, refWritten });
+  }
+
   private async install(): Promise<boolean> {
     const h = detectHarness(this.harnessDir, this.config);
     if (!h.present) {
@@ -723,30 +1308,53 @@ export class Supervisor {
     return ok;
   }
 
-  /** Ensure deps then spawn the child appropriate to the run class. */
-  async start(initialInput?: string) {
+  /** Ensure deps (compiled path) then spawn the harness per the launch mode
+   *  (decision §10.1). `opts.resume` requests native session resume (Path B). */
+  async start(initialInput?: string, opts?: { resume?: boolean }) {
     if (this.config.runClass === "plugin") {
       this.log("Plugin shapes are inspected, not run.");
       return;
     }
     const h = detectHarness(this.harnessDir, this.config);
-    if (!h.entry) {
-      this.setState("error", "no entry file in harness/");
-      this.log(`No entry file (${this.config.entry.join(" / ")}) found in harness/.`);
-      return;
-    }
-    if (!h.depsInstalled) {
-      const ok = await this.install();
-      if (!ok) return;
-    }
-    this.stop();
-    this.setState("starting");
 
     // Run the agent FROM the harness root (where crewhaus.yaml lives), not the
     // bundle dir — otherwise spec-relative paths (MCP servers, data roots,
     // .crewhaus/, .env) resolve against the wrong directory and the agent
     // exits on boot. The entry bundle may itself live in a dist/ subdir.
     const harnessRoot = findHarnessRoot(this.harnessDir);
+    const entryPath = h.entry ? join(this.harnessDir, h.entry) : null;
+
+    // Launch mode (Path A/B, §10.1). Interpreter (Path B) applies only to the
+    // stdio run classes; daemon-http/cf-worker keep their compiled entry. Path B
+    // needs a spec + a runnable `crewhaus` CLI; otherwise `bun <entry>` (Path A).
+    const interpretable =
+      this.config.runClass === "stdio-interactive" || this.config.runClass === "stdio-oneshot";
+    const specPath = interpretable ? findSpecPath(harnessRoot) : null;
+    const crewhausBin = specPath ? resolveCrewhausBin(harnessRoot) : null;
+    let prefer = launchPreference(this.config, process.env);
+    if (this.liveEdit && interpretable) prefer = "interpreter"; // sticky after a live edit
+    const plan = selectLaunch({
+      specPath,
+      crewhausBin,
+      entryPath,
+      sessionId: this.sessionId,
+      resume: !!(opts && opts.resume),
+      prefer,
+    });
+
+    if (plan.mode === "compiled") {
+      if (!h.entry) {
+        this.setState("error", "no entry file in harness/");
+        this.log(`No entry file (${this.config.entry.join(" / ")}) found in harness/.`);
+        return;
+      }
+      if (!h.depsInstalled) {
+        const ok = await this.install();
+        if (!ok) return;
+      }
+    }
+    this.stop();
+    this.setState("starting");
 
     const env: Record<string, string> = {
       ...loadEnvChain(harnessRoot),
@@ -761,11 +1369,12 @@ export class Supervisor {
       env.PORT = String(this.daemonPort);
     }
 
-    const entryPath = join(this.harnessDir, h.entry);
-    if (harnessRoot !== resolve(this.harnessDir)) {
-      this.log(`running ${entryPath}\n  cwd: ${harnessRoot} (harness root)`, "stderr");
-    }
-    const proc = spawn(["bun", entryPath], {
+    const resuming = plan.mode === "interpreter" && !!(opts && opts.resume);
+    this.log(
+      `launch: ${plan.mode}${resuming ? " (resume)" : ""} — ${plan.argv.join(" ")}\n  cwd: ${harnessRoot}`,
+      "stderr",
+    );
+    const proc = spawn(plan.argv, {
       cwd: harnessRoot,
       env,
       stdin: "pipe",
