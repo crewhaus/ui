@@ -36,6 +36,9 @@
   "engines": {
     "bun": ">=1.2"
   },
+  "scripts": {
+    "test": "bun test"
+  },
   "files": [
     "_shared",
     "src",

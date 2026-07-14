@@ -359,8 +359,13 @@
         } else if (m.state === "exited") {
           runActive = false;
           setRunEnabled(api.isPresent());
-          // If the crew finished cleanly, crew_done already set the result/state.
-          if (!finalOutput && !proseBuf.trim()) {
+          const exit = CH.failure.exitInfo(m);
+          if (exit.failed) {
+            // Crash — say why (the run_failed card in the feed carries the
+            // details; app-kit auto-opens the raw-output drawer).
+            setResultState(`Run stopped — ${exit.line}. Check the raw output log.`, "error");
+          } else if (!finalOutput && !proseBuf.trim()) {
+            // If the crew finished cleanly, crew_done already set the result/state.
             setResultState("Run exited with no output — check the raw output log.", "");
           } else if (!finalOutput) {
             // prose-only completion
@@ -586,6 +591,7 @@
 .result-state svg { width: 12px; height: 12px; }
 .result-state.running { color: var(--accent); }
 .result-state.done { color: var(--accent); }
+.result-state.error { color: var(--red); }
 .result-wrap { padding: 16px; max-height: 460px; overflow: auto; }
 .result { color: var(--ink); overflow-wrap: anywhere; }
 .result-empty { display: flex; flex-direction: column; align-items: center; gap: 10px; text-align: center;

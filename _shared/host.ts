@@ -399,6 +399,49 @@ function drain(buf: string): Drained {
   return { text, events, rest: "" };
 }
 
+// -- Exit-status context (v0.3.0 honest failure messaging) ---------------------
+//
+// When the child dies, the bare `{ state:"exited", detail:"exit code N" }`
+// broadcast is all a frontend used to get — the WHY was buried in the closed
+// raw-output drawer. The supervisor now remembers the run's last `run_failed`
+// trace event and a rolling tail of stderr, and attaches whichever exists to
+// the exit broadcast so every shape can render a real failure explanation
+// even when the process died before/without a structured event.
+
+/** How many trailing stderr lines ride along on a crash broadcast. */
+export const STDERR_TAIL_LINES = 8;
+/** Per-line cap so a pathological stderr line cannot bloat the broadcast. */
+export const STDERR_TAIL_MAX_CHARS = 400;
+
+/** Rolling capture of the last few meaningful (non-blank) stderr lines. */
+export function pushStderrTail(tail: string[], line: string): void {
+  const trimmed = line.trimEnd();
+  if (!trimmed.trim()) return;
+  tail.push(
+    trimmed.length > STDERR_TAIL_MAX_CHARS ? `${trimmed.slice(0, STDERR_TAIL_MAX_CHARS)} …` : trimmed,
+  );
+  if (tail.length > STDERR_TAIL_LINES) tail.shift();
+}
+
+/**
+ * Extra fields for the `state:"exited"` status broadcast:
+ *   exitCode   — always (structured twin of the human `detail` string)
+ *   failure    — the run's last `run_failed` trace event, when one was seen
+ *   stderrTail — last stderr lines, only on a NONZERO exit with no structured
+ *                event (clean exits keep today's behavior; a `run_failed`
+ *                is strictly better than a raw tail, so it wins)
+ */
+export function exitStatusExtra(
+  code: number,
+  lastRunFailed: Record<string, unknown> | null,
+  stderrTail: readonly string[],
+): Record<string, unknown> {
+  const extra: Record<string, unknown> = { exitCode: code };
+  if (lastRunFailed) extra.failure = lastRunFailed;
+  else if (code !== 0 && stderrTail.length > 0) extra.stderrTail = [...stderrTail];
+  return extra;
+}
+
 // -- Process supervisor -------------------------------------------------------
 
 type ClientMsg =
@@ -424,10 +467,18 @@ type ClientMsg =
 
 type Broadcast = (msg: unknown) => void;
 
-class Supervisor {
+/** Exported for the host-level tests (test/host.test.ts) and embedders. */
+export class Supervisor {
   private proc: ReturnType<typeof spawn> | null = null;
   private buf = "";
   private state: "idle" | "installing" | "starting" | "running" | "exited" | "error" = "idle";
+  /** Detail of the last state transition, kept so `snapshot()` (state
+   *  broadcasts, /api/state, WS reconnects) doesn't wipe it off the pill. */
+  private lastDetail: string | null = null;
+  /** Last `run_failed` trace event seen this run (reset on every start). */
+  private lastRunFailed: Record<string, unknown> | null = null;
+  /** Rolling tail of the child's stderr (reset on every start). */
+  private stderrTail: string[] = [];
   daemonPort: number | null = null;
 
   constructor(
@@ -439,15 +490,23 @@ class Supervisor {
   snapshot() {
     return {
       state: this.state,
+      detail: this.lastDetail,
       running: this.proc !== null,
       daemonPort: this.daemonPort,
       harness: detectHarness(this.harnessDir, this.config),
     };
   }
 
-  private setState(s: Supervisor["state"], detail?: string) {
+  private setState(s: Supervisor["state"], detail?: string, extra?: Record<string, unknown>) {
     this.state = s;
-    this.broadcast({ type: "status", state: s, detail: detail ?? null });
+    this.lastDetail = detail ?? null;
+    this.broadcast({ type: "status", state: s, detail: detail ?? null, ...(extra ?? {}) });
+  }
+
+  /** Broadcast a drained TraceEvent, remembering the run's last `run_failed`. */
+  private emitEvent(ev: Record<string, unknown>) {
+    if (ev.kind === "run_failed") this.lastRunFailed = ev;
+    this.broadcast({ type: "event", event: ev });
   }
 
   private log(line: string, stream: "stdout" | "stderr" | "system" = "system") {
@@ -621,11 +680,18 @@ class Supervisor {
     });
     this.proc = proc;
     this.buf = "";
+    this.lastRunFailed = null;
+    this.stderrTail = [];
     this.setState("running");
     this.broadcast({ type: "state", ...this.snapshot() });
 
-    void this.pumpStdout(proc.stdout);
-    void streamLines(proc.stderr, (l) => this.log(l, "stderr"));
+    const pipesDone = Promise.allSettled([
+      this.pumpStdout(proc.stdout),
+      streamLines(proc.stderr, (l) => {
+        pushStderrTail(this.stderrTail, l);
+        this.log(l, "stderr");
+      }),
+    ]);
 
     // Single-shot: feed the prompt then close stdin so the bundle runs to EOF.
     if (this.config.input === "oneshot") {
@@ -635,14 +701,22 @@ class Supervisor {
       this.writeStdin(initialInput);
     }
 
-    void proc.exited.then((code) => {
-      if (this.proc === proc) {
-        this.flushText();
-        this.setState("exited", `exit code ${code}`);
-        this.proc = null;
-        this.daemonPort = null;
-        this.broadcast({ type: "state", ...this.snapshot() });
-      }
+    void proc.exited.then(async (code) => {
+      if (this.proc !== proc) return;
+      // Let both stdio pumps drain first so a run_failed event / stderr
+      // tail still in the pipe lands BEFORE (and on) the exit broadcast.
+      await pipesDone;
+      // stop()/restart may have superseded this child while we drained.
+      if (this.proc !== proc) return;
+      this.flushText();
+      this.setState(
+        "exited",
+        `exit code ${code}`,
+        exitStatusExtra(code, this.lastRunFailed, this.stderrTail),
+      );
+      this.proc = null;
+      this.daemonPort = null;
+      this.broadcast({ type: "state", ...this.snapshot() });
     });
   }
 
@@ -676,7 +750,7 @@ class Supervisor {
       const { text, events, rest } = drain(this.buf);
       this.buf = rest;
       if (text) this.broadcast({ type: "stdout", text });
-      for (const ev of events) this.broadcast({ type: "event", event: ev });
+      for (const ev of events) this.emitEvent(ev);
     }
   }
 
@@ -684,7 +758,7 @@ class Supervisor {
     if (this.buf) {
       const { text, events } = drain(`${this.buf}\n`);
       if (text) this.broadcast({ type: "stdout", text });
-      for (const ev of events) this.broadcast({ type: "event", event: ev });
+      for (const ev of events) this.emitEvent(ev);
       this.buf = "";
     }
   }
