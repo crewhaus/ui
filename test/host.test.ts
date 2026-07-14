@@ -8,8 +8,13 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
+  crewhausResponse,
+  deriveSpecName,
   exitStatusExtra,
+  MemoryWatcher,
+  memorySurfaceOf,
   pushStderrTail,
+  resolveCrewhausPath,
   STDERR_TAIL_LINES,
   STDERR_TAIL_MAX_CHARS,
   Supervisor,
@@ -179,5 +184,252 @@ describe("Supervisor exit broadcast", () => {
     expect(exit?.exitCode).toBe(0);
     expect(exit?.failure).toBeUndefined();
     expect(exit?.stderrTail).toBeUndefined();
+  });
+});
+
+// ── Phase 1: identity latch + reconnect replay ──────────────────────────────
+
+const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Start the supervisor, collect broadcasts AND return the live supervisor. */
+async function runCollectingSup(
+  harnessDir: string,
+): Promise<{ messages: Record<string, unknown>[]; sup: Supervisor }> {
+  const messages: Record<string, unknown>[] = [];
+  let onExited: (() => void) | null = null;
+  const exited = new Promise<void>((res) => {
+    onExited = res;
+  });
+  const sup = new Supervisor(harnessDir, CONFIG as never, (msg) => {
+    const m = msg as Record<string, unknown>;
+    messages.push(m);
+    if (m.type === "status" && m.state === "exited") onExited?.();
+  });
+  await sup.start();
+  await exited;
+  return { messages, sup };
+}
+
+const SESSION_ID = "sess_0123456789abcdef";
+const envelope = (kind: string, extra: Record<string, unknown>) => ({
+  kind,
+  runId: "run_x",
+  sessionId: SESSION_ID,
+  turnNumber: 1,
+  traceId: "0".repeat(32),
+  spanId: "0".repeat(16),
+  timestamp: "2026-07-14T00:00:00.000Z",
+  ...extra,
+});
+
+describe("identity latch + event replay", () => {
+  test("latches sessionId from a scripted trace event and exposes it", async () => {
+    const ev = envelope("turn_start", { turn: 1, messageCount: 1 });
+    const dir = makeHarness(
+      "latch",
+      `console.log(JSON.stringify(${JSON.stringify(ev)}));\nprocess.exit(0);\n`,
+    );
+    const { messages, sup } = await runCollectingSup(dir);
+
+    // The supervisor kept the id...
+    expect(sup.identity().sessionId).toBe(SESSION_ID);
+    // ...and it rode along on the state/status broadcasts.
+    const withId = messages.find(
+      (m) => (m.identity as { sessionId?: string } | undefined)?.sessionId === SESSION_ID,
+    );
+    expect(withId).toBeDefined();
+    // snapshot() (WS-open state msg, /api/state) carries identity too.
+    expect((sup.snapshot().identity as { sessionId?: string }).sessionId).toBe(SESSION_ID);
+  });
+
+  test("buffers this run's trace events for replay to a late subscriber", async () => {
+    const a = envelope("turn_start", { turn: 1, messageCount: 1 });
+    const b = envelope("turn_end", { turn: 1, durationMs: 5, stopReason: "end_turn" });
+    const dir = makeHarness(
+      "replay",
+      `console.log(JSON.stringify(${JSON.stringify(a)}));\n` +
+        `console.log(JSON.stringify(${JSON.stringify(b)}));\n` +
+        `process.exit(0);\n`,
+    );
+    const { sup } = await runCollectingSup(dir);
+
+    const buffered = sup.recentEvents();
+    expect(buffered.map((e) => e.kind)).toEqual(["turn_start", "turn_end"]);
+
+    // A newly-connected client would replay exactly these (the ws.open loop).
+    const replayed: unknown[] = [];
+    for (const event of sup.recentEvents()) replayed.push({ type: "event", event, replay: true });
+    expect(replayed.length).toBe(2);
+    expect((replayed[0] as { event: { kind: string } }).event.kind).toBe("turn_start");
+  });
+});
+
+// ── Phase 1: spec-name derivation ───────────────────────────────────────────
+
+describe("deriveSpecName", () => {
+  test("reads the top-level name: from the spec yaml", () => {
+    const root = join(TMP_ROOT, "spec-yaml");
+    mkdirSync(root, { recursive: true });
+    writeFileSync(join(root, "crewhaus.yaml"), "target: cli\nname: my-agent\nmodel: opus\n");
+    expect(deriveSpecName(root)).toBe("my-agent");
+  });
+
+  test("falls back to the sole .crewhaus/state/<spec> dir", () => {
+    const root = join(TMP_ROOT, "spec-statedir");
+    mkdirSync(join(root, ".crewhaus", "state", "solo"), { recursive: true });
+    writeFileSync(join(root, "crewhaus.yaml"), "target: cli\n"); // no name:
+    expect(deriveSpecName(root)).toBe("solo");
+  });
+
+  test("returns null when nothing identifies the spec", () => {
+    const root = join(TMP_ROOT, "spec-none");
+    mkdirSync(root, { recursive: true });
+    expect(deriveSpecName(root)).toBeNull();
+  });
+});
+
+// ── Phase 1: the .crewhaus/ read route (allowlist + traversal guard) ─────────
+
+describe("crewhaus read route", () => {
+  const root = join(TMP_ROOT, "cw-root");
+  function seed() {
+    mkdirSync(join(root, ".crewhaus", "state", "demo"), { recursive: true });
+    writeFileSync(
+      join(root, ".crewhaus", "state", "demo", "focus.md"),
+      "<!-- crewhaus:focus -->\n# Focus\nship the bridge\n",
+    );
+    mkdirSync(join(root, ".crewhaus", "wiki", "demo", "articles"), { recursive: true });
+    writeFileSync(join(root, ".crewhaus", "wiki", "demo", "articles", "foo.md"), "# Foo\n");
+    mkdirSync(join(root, ".crewhaus", "secrets"), { recursive: true });
+    writeFileSync(join(root, ".crewhaus", "secrets", "keys.json"), '{"k":1}');
+    writeFileSync(join(root, ".crewhaus", ".env"), "SECRET=1\n");
+  }
+
+  test("serves an allowlisted state file as raw text", async () => {
+    seed();
+    const r = crewhausResponse(root, "state/demo/focus.md");
+    expect(r.status).toBe(200);
+    expect(await r.text()).toContain("ship the bridge");
+    expect(r.headers.get("content-type")).toContain("text/markdown");
+  });
+
+  test("lists a directory (wiki articles / plans) as JSON", async () => {
+    seed();
+    const r = crewhausResponse(root, "wiki/demo/articles");
+    expect(r.status).toBe(200);
+    const body = (await r.json()) as { type: string; entries: { name: string }[] };
+    expect(body.type).toBe("dir");
+    expect(body.entries.map((e) => e.name)).toContain("foo.md");
+  });
+
+  test("BLOCKS the non-allowlisted subtrees (secrets/audit/feedback) with 403", () => {
+    seed();
+    expect(crewhausResponse(root, "secrets/keys.json").status).toBe(403);
+    expect(crewhausResponse(root, "audit/log.jsonl").status).toBe(403);
+    expect(crewhausResponse(root, "feedback/feedback.jsonl").status).toBe(403);
+  });
+
+  test("BLOCKS .env and any dotfile with 403", () => {
+    seed();
+    expect(crewhausResponse(root, ".env").status).toBe(403);
+    expect(crewhausResponse(root, "state/demo/.lock").status).toBe(403);
+  });
+
+  test("BLOCKS `..` traversal (even routed through an allowlisted prefix)", () => {
+    seed();
+    expect(crewhausResponse(root, "../.env").status).toBe(403);
+    expect(crewhausResponse(root, "state/../secrets/keys.json").status).toBe(403);
+    expect(crewhausResponse(root, "state/demo/../../../crewhaus.yaml").status).toBe(403);
+  });
+
+  test("404s a missing allowlisted path", () => {
+    seed();
+    expect(crewhausResponse(root, "state/nope/focus.md").status).toBe(404);
+  });
+
+  test("resolveCrewhausPath returns null for every denied shape", () => {
+    expect(resolveCrewhausPath(root, "state/demo/focus.md")).not.toBeNull();
+    expect(resolveCrewhausPath(root, "secrets/x")).toBeNull();
+    expect(resolveCrewhausPath(root, "../etc/passwd")).toBeNull();
+    expect(resolveCrewhausPath(root, "")).toBeNull();
+  });
+});
+
+// ── Phase 1: path -> surface mapping (pure, exact) ──────────────────────────
+
+describe("memorySurfaceOf", () => {
+  test("maps each .crewhaus/ path to its panel surface", () => {
+    expect(memorySurfaceOf(["state", "demo", "focus.md"])).toBe("focus");
+    expect(memorySurfaceOf(["state", "demo", "plans", "plan-0001-x.md"])).toBe("plan");
+    expect(memorySurfaceOf(["state", "demo", "goals.yaml"])).toBe("goals");
+    expect(memorySurfaceOf(["state", "demo", "handoff.md"])).toBe("handoff");
+    expect(memorySurfaceOf(["wiki", "demo", "articles", "foo.md"])).toBe("wiki");
+    expect(memorySurfaceOf(["dream", "demo", "state.json"])).toBe("dream");
+    expect(memorySurfaceOf(["sessions", "sess_0123456789abcdef.jsonl"])).toBe("session");
+  });
+
+  test("a coarse (directory-granular) state event still yields a valid surface", () => {
+    // macOS FSEvents is directory-granular, so the watcher may report just the
+    // spec dir; default such state events to the focus surface.
+    expect(memorySurfaceOf(["state", "demo"])).toBe("focus");
+    expect(memorySurfaceOf(["state"])).toBe("focus");
+  });
+});
+
+// ── Phase 1: the .crewhaus/ watcher ─────────────────────────────────────────
+
+const MEMORY_SURFACES = new Set(["focus", "plan", "goals", "handoff", "wiki", "dream", "session"]);
+
+describe("MemoryWatcher", () => {
+  // fs.watch on macOS is directory-granular and reports file vs parent-dir
+  // events non-deterministically, so we assert the RELIABLE contract (a
+  // debounced memory broadcast for the right subtree + a valid surface) here,
+  // and pin the exact path->surface mapping in the pure test above.
+  test("broadcasts a memory message on a watched file change", async () => {
+    const root = join(TMP_ROOT, "watch-root");
+    mkdirSync(join(root, ".crewhaus", "state", "demo"), { recursive: true });
+    const focus = join(root, ".crewhaus", "state", "demo", "focus.md");
+    writeFileSync(focus, "before");
+
+    let onMem: ((m: Record<string, unknown>) => void) | null = null;
+    const got = new Promise<Record<string, unknown>>((res) => {
+      onMem = res;
+    });
+    const w = new MemoryWatcher(root, (msg) => {
+      const m = msg as Record<string, unknown>;
+      if (m.type === "memory") onMem?.(m);
+    });
+    w.start();
+    await delay(200); // let fs.watch establish before the write
+
+    writeFileSync(focus, "after");
+
+    const timeout = new Promise<never>((_, rej) =>
+      setTimeout(() => rej(new Error("no memory message within 3s")), 3000),
+    );
+    const msg = (await Promise.race([got, timeout])) as Record<string, unknown>;
+    w.stop();
+
+    expect(msg.type).toBe("memory");
+    expect(msg.changed).toBe(true);
+    expect(String(msg.path).startsWith("state/demo")).toBe(true);
+    expect(MEMORY_SURFACES.has(msg.surface as string)).toBe(true);
+  });
+
+  test("does NOT broadcast for non-allowlisted subtrees (secrets)", async () => {
+    const root = join(TMP_ROOT, "watch-secrets");
+    mkdirSync(join(root, ".crewhaus", "secrets"), { recursive: true });
+    const secret = join(root, ".crewhaus", "secrets", "keys.json");
+    writeFileSync(secret, "{}");
+
+    const seen: Record<string, unknown>[] = [];
+    const w = new MemoryWatcher(root, (msg) => seen.push(msg as Record<string, unknown>));
+    w.start();
+    await delay(200);
+    writeFileSync(secret, '{"k":2}');
+    await delay(400); // give any (unwanted) event time to fire + debounce
+    w.stop();
+
+    expect(seen.filter((m) => m.type === "memory")).toEqual([]);
   });
 });

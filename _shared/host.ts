@@ -23,7 +23,16 @@
 
 import { spawn } from "bun";
 import { randomBytes } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  statSync,
+  watch,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
 // -- Types --------------------------------------------------------------------
@@ -69,6 +78,13 @@ const MIME: Record<string, string> = {
   ".png": "image/png",
   ".woff2": "font/woff2",
   ".ico": "image/x-icon",
+  // `.crewhaus/` memory surfaces are broadcast as raw text for the browser to
+  // parse against the known continuity/wiki/dream grammars (Phase 3).
+  ".md": "text/markdown; charset=utf-8",
+  ".yaml": "text/yaml; charset=utf-8",
+  ".yml": "text/yaml; charset=utf-8",
+  ".jsonl": "application/x-ndjson; charset=utf-8",
+  ".txt": "text/plain; charset=utf-8",
 };
 
 function mimeFor(path: string): string {
@@ -139,6 +155,38 @@ function findHarnessRoot(harnessDir: string): string {
     d = parent;
   }
   return resolve(harnessDir);
+}
+
+/**
+ * The spec NAME that keys the harness's `.crewhaus/state/<spec>/`,
+ * `.crewhaus/wiki/<spec>/`, and `.crewhaus/dream/<spec>/` subtrees. The trace
+ * envelope carries the live `sessionId` but not the spec name, so we derive it
+ * — no `@crewhaus/*` import, staying zero-dependency:
+ *   1. the top-level `name:` of the spec yaml at the harness root, else
+ *   2. the sole directory under `.crewhaus/state/` (authoritative for whatever
+ *      the running bundle actually wrote), else null.
+ */
+export function deriveSpecName(harnessRoot: string): string | null {
+  for (const f of ["crewhaus.yaml", "crewhaus.yml"]) {
+    const p = join(harnessRoot, f);
+    if (!existsSync(p)) continue;
+    const m = readFileSync(p, "utf8").match(
+      /^\s*name:\s*["']?([A-Za-z0-9_.-]+)["']?\s*(?:#.*)?$/m,
+    );
+    if (m) return m[1];
+  }
+  const stateDir = join(harnessRoot, ".crewhaus", "state");
+  if (existsSync(stateDir)) {
+    try {
+      const dirs = readdirSync(stateDir).filter(
+        (n) => !n.startsWith(".") && statSync(join(stateDir, n)).isDirectory(),
+      );
+      if (dirs.length === 1) return dirs[0];
+    } catch {
+      /* torn/racing dir read — fall through */
+    }
+  }
+  return null;
 }
 
 // -- Harness detection --------------------------------------------------------
@@ -408,6 +456,9 @@ function drain(buf: string): Drained {
 // the exit broadcast so every shape can render a real failure explanation
 // even when the process died before/without a structured event.
 
+/** Max trace events retained per run for reconnect replay (memory bound). */
+export const EVENT_RING_MAX = 500;
+
 /** How many trailing stderr lines ride along on a crash broadcast. */
 export const STDERR_TAIL_LINES = 8;
 /** Per-line cap so a pathological stderr line cannot bloat the broadcast. */
@@ -479,6 +530,16 @@ export class Supervisor {
   private lastRunFailed: Record<string, unknown> | null = null;
   /** Rolling tail of the child's stderr (reset on every start). */
   private stderrTail: string[] = [];
+  /** Live sessionId latched from trace envelopes (reset on every start). */
+  private sessionId: string | null = null;
+  /** Spec name keying `.crewhaus/<state|wiki|dream>/<spec>/` (derived, cached). */
+  private specName: string | null = null;
+  /**
+   * Bounded ring of this run's trace events, replayed to a newly-connected WS
+   * client so a reload/settings-restart rebuilds the feed + stats instead of
+   * blanking. Reset on every start; capped by count to stay memory-bounded.
+   */
+  private eventRing: Record<string, unknown>[] = [];
   daemonPort: number | null = null;
 
   constructor(
@@ -493,19 +554,52 @@ export class Supervisor {
       detail: this.lastDetail,
       running: this.proc !== null,
       daemonPort: this.daemonPort,
+      identity: this.identity(),
       harness: detectHarness(this.harnessDir, this.config),
     };
+  }
+
+  /**
+   * The run's identity: the live `sessionId` (latched from trace envelopes) and
+   * the `specName` keying its `.crewhaus/` subtrees. Exposed in state/status
+   * broadcasts so the memory panels know which `.crewhaus/<spec>/` to read and a
+   * future settings-restart can re-attach the same session. specName is derived
+   * once and cached (it is static for a harness).
+   */
+  identity(): { sessionId: string | null; specName: string | null } {
+    if (!this.specName) {
+      const derived = deriveSpecName(findHarnessRoot(this.harnessDir));
+      if (derived) this.specName = derived;
+    }
+    return { sessionId: this.sessionId, specName: this.specName ?? null };
+  }
+
+  /** This run's buffered trace events, for replay to a late WS subscriber. */
+  recentEvents(): Record<string, unknown>[] {
+    return this.eventRing;
   }
 
   private setState(s: Supervisor["state"], detail?: string, extra?: Record<string, unknown>) {
     this.state = s;
     this.lastDetail = detail ?? null;
-    this.broadcast({ type: "status", state: s, detail: detail ?? null, ...(extra ?? {}) });
+    this.broadcast({
+      type: "status",
+      state: s,
+      detail: detail ?? null,
+      identity: this.identity(),
+      ...(extra ?? {}),
+    });
   }
 
-  /** Broadcast a drained TraceEvent, remembering the run's last `run_failed`. */
+  /**
+   * Broadcast a drained TraceEvent, latching the run's identity, remembering
+   * the last `run_failed`, and buffering it for reconnect replay.
+   */
   private emitEvent(ev: Record<string, unknown>) {
+    if (typeof ev.sessionId === "string" && ev.sessionId) this.sessionId = ev.sessionId;
     if (ev.kind === "run_failed") this.lastRunFailed = ev;
+    this.eventRing.push(ev);
+    if (this.eventRing.length > EVENT_RING_MAX) this.eventRing.shift();
     this.broadcast({ type: "event", event: ev });
   }
 
@@ -682,6 +776,8 @@ export class Supervisor {
     this.buf = "";
     this.lastRunFailed = null;
     this.stderrTail = [];
+    this.sessionId = null;
+    this.eventRing = [];
     this.setState("running");
     this.broadcast({ type: "state", ...this.snapshot() });
 
@@ -808,6 +904,219 @@ async function runWorker(
   return handler.fetch(forwarded, env, ctx);
 }
 
+// -- .crewhaus/ memory bridge (Phase 1) ---------------------------------------
+//
+// The host reads RAW `.crewhaus/` files and broadcasts them; the browser parses
+// and renders (Phase 3). No `@crewhaus/*` package import — JSON files parse
+// trivially and markdown/yaml is served as text against the known grammars.
+//
+// SECURITY: only the four safe subtrees below are ever reachable. `secrets`,
+// `audit`, `feedback`, `retention.json`, `.env`, and everything else under
+// `.crewhaus/` are NOT served. `..` traversal is rejected and the resolved
+// path is confirmed to stay inside the requested subtree.
+
+/** The ONLY `.crewhaus/` subtrees the read route + watcher expose. */
+export const CREWHAUS_READ_SUBTREES = ["state", "wiki", "dream", "sessions"] as const;
+const CREWHAUS_SUBTREE_SET = new Set<string>(CREWHAUS_READ_SUBTREES);
+
+/**
+ * Resolve `/crewhaus/<subpath>` to a safe absolute path under
+ * `<harnessRoot>/.crewhaus/`, or null if the request is denied (traversal,
+ * a non-allowlisted top-level segment, or a dotfile). The first path segment
+ * MUST be one of {@link CREWHAUS_READ_SUBTREES}.
+ */
+export function resolveCrewhausPath(harnessRoot: string, subpath: string): string | null {
+  if (!subpath || subpath.includes("..") || subpath.includes("\0")) return null;
+  const segs = subpath.split(/[\\/]+/).filter(Boolean);
+  if (segs.length === 0) return null;
+  if (!CREWHAUS_SUBTREE_SET.has(segs[0])) return null;
+  // No dotfile anywhere on the path (blocks stray `.env`/`.lock`/hidden files).
+  if (segs.some((s) => s.startsWith("."))) return null;
+  const base = join(resolve(harnessRoot), ".crewhaus");
+  const subtreeRoot = join(base, segs[0]);
+  const full = resolve(base, ...segs);
+  if (full !== subtreeRoot && !full.startsWith(subtreeRoot + "/")) return null;
+  return full;
+}
+
+type CrewhausEntry = { name: string; dir: boolean; size: number };
+
+/** JSON listing for a `.crewhaus/` directory (wiki articles/versions, plans). */
+export function crewhausListing(base: string, full: string): {
+  type: "dir";
+  path: string;
+  entries: CrewhausEntry[];
+} {
+  const rel = full.slice(base.length + 1).split(/[\\/]+/).filter(Boolean).join("/");
+  const entries: CrewhausEntry[] = [];
+  for (const name of readdirSync(full).sort()) {
+    if (name.startsWith(".")) continue;
+    let st: ReturnType<typeof statSync>;
+    try {
+      st = statSync(join(full, name));
+    } catch {
+      continue;
+    }
+    entries.push({ name, dir: st.isDirectory(), size: st.isDirectory() ? 0 : st.size });
+  }
+  return { type: "dir", path: rel, entries };
+}
+
+/**
+ * Serve a `/crewhaus/<subpath>` request: a file (raw bytes with a text-ish
+ * MIME) or, when the subpath resolves to a directory, a JSON listing. Denied
+ * paths get 403; missing paths 404. Rooted at the harness ROOT (not the bundle
+ * dir) so `.crewhaus/` — which lives beside `crewhaus.yaml` — is reachable.
+ */
+export function crewhausResponse(harnessRoot: string, subpath: string): Response {
+  const full = resolveCrewhausPath(harnessRoot, subpath);
+  if (!full) return new Response("forbidden", { status: 403 });
+  if (!existsSync(full)) return new Response("not found", { status: 404 });
+  const base = join(resolve(harnessRoot), ".crewhaus");
+  if (statSync(full).isDirectory()) {
+    return Response.json(crewhausListing(base, full));
+  }
+  return new Response(Bun.file(full), { headers: { "content-type": mimeFor(full) } });
+}
+
+/** Debounce window: coalesce a burst of writes to the same file into one msg. */
+export const MEMORY_DEBOUNCE_MS = 120;
+
+/** Map a `.crewhaus/` relative path to the panel surface it feeds. */
+export function memorySurfaceOf(segs: string[]): string {
+  const [top, ...rest] = segs;
+  if (top === "state") {
+    const last = rest[rest.length - 1] ?? "";
+    if (rest.includes("plans") || /^plan-/.test(last)) return "plan";
+    if (last === "goals.yaml") return "goals";
+    if (last === "handoff.md") return "handoff";
+    return "focus"; // focus.md and any other state file → the focus surface
+  }
+  if (top === "wiki") return "wiki";
+  if (top === "dream") return "dream";
+  if (top === "sessions") return "session";
+  return top;
+}
+
+/**
+ * Watches the four allowlisted `.crewhaus/` subtrees (via `fs.watch`, no new
+ * dependency) and broadcasts `{type:"memory", surface, path, changed:true}` on
+ * change so panels refetch. Rapid writes to one file are debounced. `.crewhaus/`
+ * is created lazily by the running agent, so a watch on the harness root picks
+ * up its creation and (re)establishes the recursive watch.
+ */
+export class MemoryWatcher {
+  private watchers: ReturnType<typeof watch>[] = [];
+  private baseWatched = false;
+  /** Allowlisted subtrees currently under a recursive watch. */
+  private subtreeWatched = new Set<string>();
+  private timers = new Map<string, ReturnType<typeof setTimeout>>();
+
+  constructor(
+    private harnessRoot: string,
+    private broadcast: Broadcast,
+  ) {}
+
+  start(): void {
+    this.stop();
+    // Catch `.crewhaus/` being created after boot (first run of a fresh repo).
+    try {
+      this.watchers.push(
+        watch(this.harnessRoot, { persistent: false }, (_evt, name) => {
+          if (name === ".crewhaus") this.attachCrewhaus();
+        }),
+      );
+    } catch {
+      /* root not watchable — attachCrewhaus below still covers the common case */
+    }
+    this.attachCrewhaus();
+  }
+
+  /**
+   * Watch each allowlisted subtree ROOT (state/wiki/dream/sessions) separately
+   * rather than `.crewhaus/` recursively: a per-subtree recursive watch reports
+   * the precise path relative to the subtree (e.g. `demo/focus.md`), whereas
+   * watching the base also surfaces coarse `state` directory-rename events that
+   * can't be attributed to a file. A non-recursive watch on `.crewhaus/` itself
+   * catches a subtree dir being created lazily by the running agent.
+   */
+  private attachCrewhaus(): void {
+    const base = join(this.harnessRoot, ".crewhaus");
+    if (!existsSync(base)) return;
+    if (!this.baseWatched) {
+      try {
+        this.watchers.push(
+          watch(base, { persistent: false }, (_evt, name) => {
+            if (typeof name === "string" && CREWHAUS_SUBTREE_SET.has(name)) this.attachSubtree(name);
+          }),
+        );
+        this.baseWatched = true;
+      } catch {
+        /* base not watchable — subtrees present at boot are still covered */
+      }
+    }
+    for (const sub of CREWHAUS_READ_SUBTREES) this.attachSubtree(sub);
+  }
+
+  private attachSubtree(sub: string): void {
+    if (this.subtreeWatched.has(sub)) return;
+    const dir = join(this.harnessRoot, ".crewhaus", sub);
+    if (!existsSync(dir)) return;
+    const onName = (name: string) => this.onChange(`${sub}/${name}`);
+    try {
+      this.watchers.push(
+        watch(dir, { persistent: false, recursive: true }, (_evt, name) => {
+          if (typeof name === "string") onName(name);
+        }),
+      );
+      this.subtreeWatched.add(sub);
+    } catch {
+      // Recursive watch unsupported on this platform: non-recursive best effort.
+      try {
+        this.watchers.push(
+          watch(dir, { persistent: false }, (_evt, name) => {
+            if (typeof name === "string") onName(name);
+          }),
+        );
+        this.subtreeWatched.add(sub);
+      } catch {
+        /* skip this subtree */
+      }
+    }
+  }
+
+  private onChange(relFromBase: string): void {
+    const segs = relFromBase.split(/[\\/]+/).filter(Boolean);
+    if (segs.length === 0 || !CREWHAUS_SUBTREE_SET.has(segs[0])) return; // ignore secrets/audit/feedback
+    const norm = segs.join("/");
+    const surface = memorySurfaceOf(segs);
+    const prev = this.timers.get(norm);
+    if (prev) clearTimeout(prev);
+    this.timers.set(
+      norm,
+      setTimeout(() => {
+        this.timers.delete(norm);
+        this.broadcast({ type: "memory", surface, path: norm, changed: true });
+      }, MEMORY_DEBOUNCE_MS),
+    );
+  }
+
+  stop(): void {
+    for (const w of this.watchers) {
+      try {
+        w.close();
+      } catch {
+        /* already closed */
+      }
+    }
+    this.watchers = [];
+    this.baseWatched = false;
+    this.subtreeWatched.clear();
+    for (const t of this.timers.values()) clearTimeout(t);
+    this.timers.clear();
+  }
+}
+
 // -- Server -------------------------------------------------------------------
 
 const WS_CLIENTS = new Set<{ send: (s: string) => void }>();
@@ -877,6 +1186,12 @@ export function serve(opts: string | ServeOptions): void {
 
   const sup = new Supervisor(harnessDir, config, broadcast);
 
+  // `.crewhaus/` lives at the harness ROOT (beside crewhaus.yaml), not the
+  // bundle dir — root the read route + watcher there (the rooting fix).
+  const harnessRoot = findHarnessRoot(harnessDir);
+  const memoryWatcher = new MemoryWatcher(harnessRoot, broadcast);
+  memoryWatcher.start();
+
   const staticFile = (path: string): Response | null => {
     if (!existsSync(path) || statSync(path).isDirectory()) return null;
     return new Response(Bun.file(path), { headers: { "content-type": mimeFor(path) } });
@@ -921,6 +1236,15 @@ export function serve(opts: string | ServeOptions): void {
         return runWorker(harnessDir, req, path.slice("/worker/".length));
       }
 
+      // Read-only `.crewhaus/` memory surfaces (focus/plans/goals/handoff, wiki
+      // articles+versions, dream state, session logs), rooted at the harness
+      // ROOT. Allowlisted to state|wiki|dream|sessions; secrets/audit/feedback/
+      // .env are never reachable, `..` is rejected. A directory resolves to a
+      // JSON listing (wiki articles/versions, plans); a file to its raw bytes.
+      if (path.startsWith("/crewhaus/")) {
+        return crewhausResponse(harnessRoot, path.slice("/crewhaus/".length));
+      }
+
       // Read-only files from the user's harness dir (e.g. wrangler.toml,
       // package.json for the cf-worker manifest panel). Secrets are never served.
       if (path.startsWith("/harness/")) {
@@ -951,6 +1275,12 @@ export function serve(opts: string | ServeOptions): void {
       open(ws) {
         WS_CLIENTS.add(ws);
         ws.send(JSON.stringify({ type: "state", config, ...sup.snapshot() }));
+        // Replay this run's buffered trace events so a reload / settings-restart
+        // rebuilds the feed + stats instead of blanking. Marked `replay:true`
+        // (frontends accrue/render them exactly like live events).
+        for (const event of sup.recentEvents()) {
+          ws.send(JSON.stringify({ type: "event", event, replay: true }));
+        }
       },
       close(ws) {
         WS_CLIENTS.delete(ws);

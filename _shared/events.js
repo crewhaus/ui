@@ -240,6 +240,36 @@
       title: `circuit ${e.fromState} -> ${e.toState}`,
       sub: e.reason || "",
     }),
+    // ── Routing / cache infrastructure (v0.3.0) ──────────────────────────────
+    cache_rotation: (e) => ({
+      icon: "refresh",
+      sev: "muted",
+      title: "prompt cache rotated",
+      meta: Number.isFinite(e.rotatedAt) ? new Date(e.rotatedAt).toLocaleTimeString() : "",
+    }),
+    model_route: (e) => ({
+      icon: "git",
+      sev: "info",
+      name: e.model,
+      title: `route · ${e.policy}`,
+      sub: e.reason || "",
+      badge: e.explored ? "exploring" : e.routeKey || "",
+      meta: e.explored ? e.routeKey || "" : "",
+    }),
+    model_tier_route: (e) => ({
+      icon: "layers",
+      sev: e.escalated ? "warn" : "muted",
+      name: e.model,
+      title: `tier · ${e.tier}`,
+      sub: e.reason || "",
+      badge: e.escalated ? "escalated" : "",
+    }),
+    model_failover: (e) => ({
+      icon: "refresh",
+      sev: "warn",
+      title: `failover ${e.from} -> ${e.to}`,
+      badge: e.reason || "",
+    }),
   };
 
   function pct(a, b) {
