@@ -100,3 +100,57 @@ describe("v0.3.0 routing / cache renderers", () => {
     expect(events.render({ kind: "model_stream_token" })).toBeNull(); // FEED_SKIP
   });
 });
+
+describe("cost/token accrual (Phase 2 — decoupled from pricing)", () => {
+  type Stats = ReturnType<
+    (typeof events & { newStats: () => Record<string, number | boolean> })["newStats"]
+  >;
+  const mod = () => events as unknown as { newStats: () => Stats; accrue: (e: unknown, s: Stats) => Stats };
+
+  test("tokens come from model_response.usage, not cost_accrual", () => {
+    const { newStats, accrue } = mod();
+    const s = newStats();
+    accrue({ kind: "model_response", usage: { input: 100, output: 40, cacheRead: 10, cacheCreate: 5 } }, s);
+    expect(s.tokensIn).toBe(100);
+    expect(s.tokensOut).toBe(40);
+    expect(s.cacheTokens).toBe(15);
+  });
+
+  test("a pricing miss (unpriced cost_accrual) still yields tokens + flags unpriced", () => {
+    const { newStats, accrue } = mod();
+    const s = newStats();
+    // model_response carries the real tokens even when the model is unpriced…
+    accrue({ kind: "model_response", usage: { input: 200, output: 60 } }, s);
+    // …and the factory emits a $0 cost_accrual with unpriced:true on a miss.
+    accrue({ kind: "cost_accrual", costUsdMicros: 0, inputTokens: 200, outputTokens: 60, unpriced: true }, s);
+    expect(s.tokensIn).toBe(200); // NOT double-counted from cost_accrual
+    expect(s.tokensOut).toBe(60);
+    expect(s.costMicros).toBe(0);
+    expect(s.unpriced).toBe(true);
+  });
+
+  test("a priced response accrues cost and is not flagged unpriced", () => {
+    const { newStats, accrue } = mod();
+    const s = newStats();
+    accrue({ kind: "model_response", usage: { input: 50, output: 20 } }, s);
+    accrue({ kind: "cost_accrual", costUsdMicros: 1500, inputTokens: 50, outputTokens: 20 }, s);
+    expect(s.costMicros).toBe(1500);
+    expect(s.tokensIn).toBe(50);
+    expect(s.unpriced).toBe(false);
+  });
+
+  test("fallback unpriced signal (zero cost + real tokens) for pre-flag runtimes", () => {
+    const { newStats, accrue } = mod();
+    const s = newStats();
+    accrue({ kind: "cost_accrual", costUsdMicros: 0, inputTokens: 10, outputTokens: 5 }, s);
+    expect(s.unpriced).toBe(true);
+  });
+
+  test("aggregate summary cost_accrual is ignored", () => {
+    const { newStats, accrue } = mod();
+    const s = newStats();
+    accrue({ kind: "cost_accrual", summary: true, costUsdMicros: 9999 }, s);
+    expect(s.costMicros).toBe(0);
+    expect(s.unpriced).toBe(false);
+  });
+});
