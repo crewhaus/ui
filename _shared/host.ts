@@ -310,11 +310,26 @@ async function streamLines(
 // in between -> assistant text / logs. This splitter pulls embedded JSON events
 // out of the raw stream without ever stalling on prose that contains braces.
 
+// Crew orchestration events are streamed by the crew daemon without a runId or
+// timestamp (they carry {kind, role|from|to, ...}). They are still structured
+// events the crew UI wants on the event channel, and no other shape emits these
+// kinds, so recognizing them here is safe and shape-agnostic.
+const RUNIDLESS_EVENT_KINDS = new Set([
+  "role_start",
+  "role_end",
+  "handoff",
+  "crew_done",
+  "a2a_message",
+]);
+
 function looksLikeEvent(o: unknown): o is Record<string, unknown> {
   if (!o || typeof o !== "object") return false;
   const r = o as Record<string, unknown>;
+  if (typeof r.kind !== "string") return false;
   return (
-    typeof r.kind === "string" && (typeof r.runId === "string" || typeof r.timestamp === "string")
+    typeof r.runId === "string" ||
+    typeof r.timestamp === "string" ||
+    RUNIDLESS_EVENT_KINDS.has(r.kind)
   );
 }
 
