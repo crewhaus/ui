@@ -258,6 +258,439 @@
   const EXTRA_FILE_RE =
     /(?:[\w.\-]+\/)*[\w.\-]+\.(?:png|jpe?g|gif|svg|webp|avif|bmp|ico|tiff?|pdf|jsonl|ndjson|csv|tsv|log|xml|wasm|ipynb|parquet)\b/g;
 
+  // ── Memory-file parsers (Phase 3c; DOM-free, unit-tested) ────────────────
+  // These mirror the EXACT factory v0.3.0 grammars so the browser can parse the
+  // RAW `.crewhaus/` files the host serves (the host never imports @crewhaus/*).
+  // Verified against factory tag v0.3.0 (a609f23):
+  //   continuity-store/src/index.ts  (renderFocusFile/parseFocusFile,
+  //   renderPlanFile/parsePlanFile, REQ_LINE_REGEX, STEP_LINE_REGEX, goals),
+  //   continuity-store/src/handoff.ts (renderHandoff / renderStatus).
+
+  const FOCUS_MARKER = "<!-- crewhaus:focus -->";
+  const ACTIVE_PLAN_MARKER = "<!-- crewhaus:active-plan -->";
+  const REQUIREMENTS_MARKER = "<!-- crewhaus:requirements -->";
+  const NONE_LINE = "_none_";
+  const LEDGER_TRUNCATED_LINE = "[ledger truncated]";
+  const PLAN_ID_RE = /^plan-\d{4}$/;
+  // Factory REQ_LINE_REGEX — group 3 keeps the surrounding quotes and is
+  // JSON.parse()'d to recover the verbatim (possibly escaped) user text.
+  const REQ_LINE_RE =
+    /^- (REQ-\d{3,}) \[(open|confirmed|dropped)\] (".*") \(user, (sess_[0-9a-f]{16}), turn (\d+)\)$/;
+  // Factory STEP_LINE_REGEX, applied to a trimmed line.
+  const STEP_LINE_RE = /^(\d+)\. \[(open|in_progress|claimed|proven)\] (.+)$/;
+  const FRONTMATTER_RE = /^---\n([\s\S]*?)\n---\n?/;
+
+  /**
+   * Parse `focus.md` → { body, activePlan, requirements[], ledgerTruncated,
+   * present }. Byte-for-byte the inverse of factory `parseFocusFile`: the file
+   * MUST open with the focus marker (else it is a user-authored file we don't
+   * own → present:false); the body is everything between `# Focus` and the
+   * Active-plan header; `_none_` maps to a null active plan; each requirement is
+   * a REQ ledger line whose verbatim text is JSON-decoded and presented as-is.
+   */
+  function parseFocus(raw) {
+    raw = String(raw == null ? "" : raw);
+    if (!raw.trimStart().startsWith(FOCUS_MARKER)) {
+      return { body: "", activePlan: null, requirements: [], ledgerTruncated: false, present: false };
+    }
+    const activeHeader = `## Active plan\n${ACTIVE_PLAN_MARKER}`;
+    const reqHeader = `## Requirements\n${REQUIREMENTS_MARKER}`;
+    const activeIdx = raw.indexOf(activeHeader);
+    const reqIdx = raw.indexOf(reqHeader);
+    const afterMarker = raw.indexOf(FOCUS_MARKER) + FOCUS_MARKER.length;
+    const bodyEnd = activeIdx >= 0 ? activeIdx : reqIdx >= 0 ? reqIdx : raw.length;
+    const body = raw.slice(afterMarker, bodyEnd).replace(/^\s*# Focus\s*\n/, "").trim();
+
+    let activePlan = null;
+    if (activeIdx >= 0) {
+      const start = activeIdx + activeHeader.length;
+      const end = reqIdx >= 0 ? reqIdx : raw.length;
+      const line = (raw.slice(start, end).trim().split("\n")[0] || "").trim();
+      if (PLAN_ID_RE.test(line)) activePlan = line;
+    }
+
+    const requirements = [];
+    let ledgerTruncated = false;
+    if (reqIdx >= 0) {
+      for (const l of raw.slice(reqIdx + reqHeader.length).split("\n").map((s) => s.trim())) {
+        if (l === LEDGER_TRUNCATED_LINE) {
+          ledgerTruncated = true;
+          continue;
+        }
+        const m = l.match(REQ_LINE_RE);
+        if (!m) continue;
+        let text;
+        try {
+          text = JSON.parse(m[3]); // verbatim user words — never a re-render
+        } catch {
+          continue; // hand-mangled line — skip rather than mis-attribute
+        }
+        requirements.push({ id: m[1], status: m[2], text, sessionId: m[4], turn: Number(m[5]) });
+      }
+    }
+    return { body, activePlan, requirements, ledgerTruncated, present: true };
+  }
+
+  /** Count requirements by ledger status. Pure; unit-tested. */
+  function summarizeRequirements(reqs) {
+    const s = { open: 0, confirmed: 0, dropped: 0, total: 0 };
+    for (const r of reqs || []) {
+      if (!r || typeof r.status !== "string") continue;
+      if (Object.prototype.hasOwnProperty.call(s, r.status)) s[r.status]++;
+      s.total++;
+    }
+    return s;
+  }
+
+  // A tiny YAML scalar reader for the small, machine-generated documents
+  // CrewHaus writes (plan frontmatter + goals.yaml). Handles plain, "double"
+  // and 'single' quoted scalars, numbers, booleans and null — the only shapes
+  // the `yaml` lib emits here. NOT a general YAML parser (no flow collections).
+  function yScalar(s) {
+    s = String(s == null ? "" : s).trim();
+    if (s === "" || s === "~" || s === "null") return null;
+    if (s === "true") return true;
+    if (s === "false") return false;
+    if (/^-?\d+$/.test(s)) return Number(s);
+    if (/^-?\d*\.\d+$/.test(s)) return Number(s);
+    if (s[0] === '"') {
+      try {
+        return JSON.parse(s);
+      } catch {
+        return s.slice(1).replace(/"$/, "");
+      }
+    }
+    if (s[0] === "'") return s.slice(1).replace(/'$/, "").replace(/''/g, "'");
+    return s;
+  }
+
+  /** Read the top-level `key: value` scalars from a YAML frontmatter block
+      (nested blocks like `proofs:` are indented and skipped here). */
+  function frontmatterScalars(fmText) {
+    const fm = {};
+    for (const line of String(fmText || "").split("\n")) {
+      if (line === "" || /^\s/.test(line)) continue; // indent-0 lines only
+      const m = line.match(/^([A-Za-z_][\w-]*):\s*(.*)$/);
+      if (m && m[2] !== "") fm[m[1]] = yScalar(m[2]);
+    }
+    return fm;
+  }
+
+  /** Best-effort extract of the plan frontmatter `proofs` map
+      ({ "<stepIndex>": FrozenProof[] }) → { <stepIndex>: [toolUseId, …] }.
+      A focused line scanner (not a full YAML parser) keyed off `proofs:` →
+      `"<n>":` → `toolUseId:` lines; tolerant of indentation. */
+  function extractProofs(fmText) {
+    const out = {};
+    let inProofs = false;
+    let proofsIndent = -1;
+    let curStep = null;
+    for (const line of String(fmText || "").split("\n")) {
+      if (/^\s*$/.test(line)) continue;
+      const indent = line.length - line.replace(/^ +/, "").length;
+      const text = line.slice(indent);
+      if (!inProofs) {
+        if (/^proofs\s*:\s*$/.test(text)) {
+          inProofs = true;
+          proofsIndent = indent;
+        }
+        continue;
+      }
+      if (indent <= proofsIndent) {
+        inProofs = false;
+        curStep = null;
+        continue;
+      }
+      const stepKey = text.match(/^(?:"(\d+)"|'(\d+)'|(\d+))\s*:\s*$/);
+      if (stepKey) {
+        curStep = stepKey[1] || stepKey[2] || stepKey[3];
+        out[curStep] = out[curStep] || [];
+        continue;
+      }
+      if (curStep != null) {
+        const m = text.match(/^-?\s*toolUseId\s*:\s*(.+)$/);
+        if (m) out[curStep].push(yScalar(m[1]));
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Parse a `plan-NNNN-*.md` file → { frontmatter:{id,slug,title,createdAt,
+   * updatedAt}, steps:[{n,status,text,proofs[]}] }. Mirrors factory
+   * `parsePlanFile`: steps come from the body via STEP_LINE_REGEX and are
+   * numbered by POSITION (not the literal digit); a step's proofs come from the
+   * frontmatter `proofs` map keyed by that position. The claimed↔proven
+   * distinction is preserved verbatim: `claimed` carries no proofs (a free,
+   * UNVERIFIED claim); `proven` carries the machine-verified evidence toolUseId.
+   */
+  function parsePlan(raw) {
+    raw = String(raw == null ? "" : raw);
+    const fmMatch = raw.match(FRONTMATTER_RE);
+    const fmText = fmMatch ? fmMatch[1] : "";
+    const fm = frontmatterScalars(fmText);
+    const proofs = extractProofs(fmText);
+    const body = fmMatch ? raw.slice(fmMatch[0].length) : raw;
+    const steps = [];
+    for (const line of body.split("\n")) {
+      const m = line.trim().match(STEP_LINE_RE);
+      if (!m) continue;
+      const n = steps.length + 1; // position-based, like factory
+      steps.push({ n, status: m[2], text: m[3].trim(), proofs: proofs[String(n)] || [] });
+    }
+    const id = typeof fm.id === "string" ? fm.id : "";
+    return {
+      frontmatter: {
+        id,
+        slug: typeof fm.slug === "string" ? fm.slug : "",
+        title: typeof fm.title === "string" ? fm.title : id,
+        createdAt: typeof fm.createdAt === "string" ? fm.createdAt : "",
+        updatedAt: typeof fm.updatedAt === "string" ? fm.updatedAt : "",
+      },
+      steps,
+    };
+  }
+
+  /**
+   * Parse `goals.yaml` (`{version, goals:[{id,title,status,target?,current?,
+   * unit?,…}]}`) → the goals array. A focused block reader for the `yaml`-lib
+   * output (block sequence of mappings, 2-space indent); returns only
+   * well-shaped goals (string id/title/status). Malformed input → [].
+   */
+  function parseGoals(raw) {
+    const lines = String(raw == null ? "" : raw).replace(/\r/g, "").split("\n");
+    const goals = [];
+    let inGoals = false;
+    let cur = null;
+    let itemIndent = -1;
+    for (const line of lines) {
+      if (/^\s*$/.test(line) || /^\s*#/.test(line)) continue;
+      const indent = line.length - line.replace(/^ +/, "").length;
+      const text = line.slice(indent);
+      if (!inGoals) {
+        if (/^goals\s*:/.test(text) && indent === 0) inGoals = true;
+        continue;
+      }
+      if (text[0] === "-") {
+        if (cur) goals.push(cur);
+        cur = {};
+        itemIndent = indent;
+        const rest = text.slice(1).replace(/^ +/, "");
+        const kv = rest.match(/^([A-Za-z_][\w-]*):\s*(.*)$/);
+        if (kv) cur[kv[1]] = yScalar(kv[2]);
+        continue;
+      }
+      if (cur && indent > itemIndent) {
+        const kv = text.match(/^([A-Za-z_][\w-]*):\s*(.*)$/);
+        if (kv && kv[2] !== "") cur[kv[1]] = yScalar(kv[2]);
+      } else if (indent === 0) {
+        break; // left the goals block, back to a top-level key
+      }
+    }
+    if (cur) goals.push(cur);
+    return goals.filter(
+      (g) => g && typeof g.id === "string" && typeof g.title === "string" && typeof g.status === "string",
+    );
+  }
+
+  /** Presentation metadata for a ladder status. Pinning the claimed↔proven
+      distinction here (claimed = amber, UNVERIFIED; proven = green, VERIFIED)
+      keeps it unit-testable without a DOM. */
+  function statusMeta(status) {
+    switch (status) {
+      case "proven":
+        return { cls: "st-proven", label: "proven", note: "verified", verified: true };
+      case "claimed":
+        return { cls: "st-claimed", label: "claimed", note: "unverified", verified: false };
+      case "in_progress":
+        return { cls: "st-in-progress", label: "in progress", note: "", verified: false };
+      case "confirmed":
+        return { cls: "st-confirmed", label: "confirmed", note: "", verified: false };
+      case "dropped":
+        return { cls: "st-dropped", label: "dropped", note: "", verified: false };
+      case "open":
+        return { cls: "st-open", label: "open", note: "", verified: false };
+      default:
+        return { cls: "st-open", label: status || "—", note: "", verified: false };
+    }
+  }
+
+  /** The `## Next actions` list items from a rendered `handoff.md` (factory
+      handoff.ts derives these; `_none_` yields none). */
+  function parseHandoffNextActions(raw) {
+    raw = String(raw == null ? "" : raw);
+    const idx = raw.indexOf("## Next actions");
+    if (idx < 0) return [];
+    const after = raw.slice(idx + "## Next actions".length);
+    const stop = after.search(/\n## /);
+    const section = stop >= 0 ? after.slice(0, stop) : after;
+    const out = [];
+    for (const l of section.split("\n")) {
+      const m = l.match(/^\s*-\s+(.*\S)\s*$/);
+      if (m && m[1] !== NONE_LINE) out.push(m[1]);
+    }
+    return out;
+  }
+
+  /** Normalize a wiki `index.json` (array of WikiRef) → a stable, defensive
+      list. Accepts a parsed array or a raw JSON string. */
+  function parseWikiIndex(json) {
+    let arr = json;
+    if (typeof json === "string") {
+      try {
+        arr = JSON.parse(json);
+      } catch {
+        return [];
+      }
+    }
+    if (!Array.isArray(arr)) return [];
+    return arr
+      .filter((e) => e && typeof e === "object" && typeof e.slug === "string")
+      .map((e) => ({
+        slug: e.slug,
+        title: typeof e.title === "string" ? e.title : e.slug,
+        tags: Array.isArray(e.tags) ? e.tags.filter((t) => typeof t === "string") : [],
+        confidence: typeof e.confidence === "number" ? e.confidence : null,
+        verified: !!e.verified,
+        version: typeof e.version === "number" ? e.version : null,
+        updatedAt: typeof e.updatedAt === "string" ? e.updatedAt : "",
+        status: typeof e.status === "string" ? e.status : "",
+      }));
+  }
+  /** Case-insensitive filter over slug/title/tags. */
+  function filterWiki(list, query) {
+    const q = String(query || "").trim().toLowerCase();
+    if (!q) return list || [];
+    return (list || []).filter(
+      (r) =>
+        r.slug.toLowerCase().includes(q) ||
+        r.title.toLowerCase().includes(q) ||
+        r.tags.some((t) => t.toLowerCase().includes(q)),
+    );
+  }
+  /** Most-recently-updated first, then title. */
+  function sortWiki(list) {
+    return (list || [])
+      .slice()
+      .sort((a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || "") || a.title.localeCompare(b.title));
+  }
+
+  /** Strip a leading YAML frontmatter block from an article body for rendering. */
+  function stripFrontmatter(md) {
+    const m = String(md == null ? "" : md).match(FRONTMATTER_RE);
+    return m ? String(md).slice(m[0].length) : String(md == null ? "" : md);
+  }
+
+  // ── Session-JSONL + live-event derivations (context / skills) ────────────
+  /** Parse a `.jsonl` blob into records, skipping blank/malformed lines. */
+  function parseJsonl(text) {
+    const out = [];
+    for (const line of String(text == null ? "" : text).split("\n")) {
+      const t = line.trim();
+      if (!t) continue;
+      try {
+        out.push(JSON.parse(t));
+      } catch {
+        /* torn / partial line — skip */
+      }
+    }
+    return out;
+  }
+  /** `context_evicted` records (durable, verbatim) → [{role,text,turnNumber}]. */
+  function sessionEvictions(records) {
+    const out = [];
+    for (const r of records || []) {
+      if (!r || r.kind !== "context_evicted") continue;
+      const p = r.payload || {};
+      out.push({
+        role: typeof p.role === "string" ? p.role : "",
+        text: typeof p.text === "string" ? p.text : "",
+        turnNumber: typeof p.turnNumber === "number" ? p.turnNumber : null,
+      });
+    }
+    return out;
+  }
+  /**
+   * Skills USED this session, aggregated from durable session-JSONL `tool_use`
+   * records where the tool name is "Skill" (factory logs the full input JSON,
+   * so `payload.input.name` names the skill — the LIVE trace `tool_call_start`
+   * carries only byte counts, no args, so it can't name the skill).
+   * → [{name,count}] desc by count.
+   *
+   * NOTE: the "available skills" list (vs used) has no host route or event —
+   * skills are discovered at runtime (`discoverSkills` over dirs + builtins);
+   * surfacing them needs a future host `discoverSkills` endpoint.
+   */
+  function aggregateSkills(records) {
+    const counts = new Map();
+    for (const r of records || []) {
+      if (!r || r.kind !== "tool_use") continue;
+      const p = r.payload || {};
+      if (p.name !== "Skill") continue;
+      const name =
+        p.input && typeof p.input === "object" && typeof p.input.name === "string"
+          ? p.input.name
+          : "(unnamed)";
+      counts.set(name, (counts.get(name) || 0) + 1);
+    }
+    return [...counts.entries()]
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+  }
+  /** Live count of Skill tool invocations from the trace ring (no names). */
+  function countSkillCalls(events) {
+    let n = 0;
+    for (const ev of events || []) {
+      if (ev && ev.kind === "tool_call_start" && ev.toolName === "Skill") n++;
+    }
+    return n;
+  }
+
+  const NOMINAL_CONTEXT_WINDOW = 200000; // nominal reference only — see §10.4
+  /**
+   * Accumulate the client-side context proxy from `model_response.usage`
+   * (the only live signal — there is NO true window-size event; §10.4). Returns
+   * the cumulative input running-total across the session PLUS the last/peak
+   * per-turn input and the output total. Honest estimate: cumulative input is
+   * not live window occupancy (context is re-sent each turn).
+   */
+  function accumulateContext(events) {
+    let cumulativeInput = 0;
+    let cumulativeOutput = 0;
+    let lastInput = 0;
+    let peakInput = 0;
+    let turns = 0;
+    let lastCacheRead = 0;
+    for (const ev of events || []) {
+      if (!ev || ev.kind !== "model_response" || !ev.usage) continue;
+      const u = ev.usage;
+      const inp = typeof u.input === "number" ? u.input : 0;
+      const out = typeof u.output === "number" ? u.output : 0;
+      cumulativeInput += inp;
+      cumulativeOutput += out;
+      lastInput = inp;
+      if (inp > peakInput) peakInput = inp;
+      if (typeof u.cacheRead === "number") lastCacheRead = u.cacheRead;
+      turns++;
+    }
+    return { cumulativeInput, cumulativeOutput, lastInput, peakInput, turns, lastCacheRead };
+  }
+  /** Compaction markers from the LIVE trace (`compaction_fired`: message
+      counts + phase). Eviction detail comes from the durable JSONL instead. */
+  function collectCompactions(events) {
+    const out = [];
+    for (const ev of events || []) {
+      if (!ev || ev.kind !== "compaction_fired") continue;
+      out.push({
+        subKind: ev.subKind || "",
+        before: typeof ev.before === "number" ? ev.before : null,
+        after: typeof ev.after === "number" ? ev.after : null,
+        phase: ev.phase || "",
+      });
+    }
+    return out;
+  }
+
   // ── DOM utilities (browser-only; guarded for the DOM-less test env) ──────
   let API = null; // captured on first mount; lets badge() read live state
   const taskNames = new Set(); // sub-agent names learned from the event ring
@@ -339,6 +772,82 @@
       color:var(--ink);white-space:pre-wrap;word-break:break-word;overflow:auto;max-height:56vh;}
     .v-file-img{max-width:100%;height:auto;border:1px solid var(--rule);border-radius:var(--radius-sm);background:#fff;}
     .v-art .v-row{cursor:default;}
+    /* memory views (Phase 3c) */
+    .panel-view .md{font-size:13px;line-height:1.55;color:var(--ink);}
+    .panel-view .md h1,.panel-view .md h2,.panel-view .md h3{font-size:13.5px;margin:8px 0 4px;}
+    .panel-view .md p{margin:4px 0;}
+    /* ladder / requirement status chips */
+    .v-chip{display:inline-flex;align-items:center;gap:4px;font-family:var(--mono);font-size:9.5px;
+      text-transform:uppercase;letter-spacing:.04em;padding:1px 6px;border-radius:999px;border:1px solid var(--rule);
+      color:var(--ink-2);background:var(--panel-3);white-space:nowrap;}
+    .v-chip.st-open{color:var(--ink-3);}
+    .v-chip.st-in-progress{color:var(--accent);border-color:var(--accent-glow);background:var(--accent-ghost);}
+    .v-chip.st-claimed{color:#d9982b;border-color:rgba(217,152,43,.5);background:rgba(217,152,43,.12);}
+    .v-chip.st-proven{color:#3fa46b;border-color:rgba(63,164,107,.5);background:rgba(63,164,107,.13);}
+    .v-chip.st-confirmed{color:#3fa46b;border-color:rgba(63,164,107,.45);background:rgba(63,164,107,.1);}
+    .v-chip.st-dropped{color:var(--ink-3);text-decoration:line-through;opacity:.75;}
+    .v-chip-note{font-size:9px;opacity:.85;text-transform:none;letter-spacing:0;}
+    /* focus view */
+    .v-focus{display:flex;flex-direction:column;gap:12px;}
+    .v-focus-body{padding:2px 0;}
+    .v-active-plan{display:flex;align-items:center;gap:7px;}
+    .v-req{display:flex;flex-direction:column;gap:4px;padding:7px 9px;border:1px solid var(--rule);
+      border-radius:var(--radius-sm);background:var(--panel-2);}
+    .v-req-head{display:flex;align-items:center;gap:6px;flex-wrap:wrap;}
+    .v-req-id{font-family:var(--mono);font-size:11px;color:var(--ink-3);}
+    .v-req-text{font-size:12.5px;color:var(--ink);line-height:1.45;}
+    .v-req-quote{border-left:2px solid var(--accent-glow);padding-left:8px;color:var(--ink);font-style:italic;}
+    .v-req-src{font-family:var(--mono);font-size:10px;color:var(--ink-3);}
+    .v-counts{display:flex;gap:6px;flex-wrap:wrap;}
+    /* plan view */
+    .v-plan{display:flex;flex-direction:column;gap:12px;}
+    .v-plan-switch{display:flex;gap:6px;flex-wrap:wrap;}
+    .v-plan-tab{font-family:var(--mono);font-size:11px;padding:3px 8px;border-radius:999px;cursor:pointer;
+      border:1px solid var(--rule);background:var(--panel-2);color:var(--ink-2);}
+    .v-plan-tab:hover{background:var(--panel-3);}
+    .v-plan-tab.active{border-color:var(--accent);color:var(--accent);background:var(--accent-ghost);}
+    .v-plan-title{font-size:14px;color:var(--ink);font-weight:600;}
+    .v-plan-meta{font-size:11px;color:var(--ink-3);margin-top:2px;}
+    .v-step{display:flex;gap:8px;align-items:flex-start;padding:6px 8px;border:1px solid var(--rule);
+      border-radius:var(--radius-sm);background:var(--panel-2);}
+    .v-step-n{flex:0 0 auto;width:18px;height:18px;display:grid;place-items:center;border-radius:50%;
+      font-family:var(--mono);font-size:10px;color:var(--ink-3);background:var(--panel-4);margin-top:1px;}
+    .v-step.is-proven{border-color:rgba(63,164,107,.35);}
+    .v-step.is-claimed{border-color:rgba(217,152,43,.35);}
+    .v-step-main{min-width:0;flex:1;display:flex;flex-direction:column;gap:3px;}
+    .v-step-head{display:flex;align-items:center;gap:6px;flex-wrap:wrap;}
+    .v-step-text{font-size:12.5px;color:var(--ink);line-height:1.45;}
+    .v-proof{font-family:var(--mono);font-size:10px;color:#3fa46b;word-break:break-all;}
+    .v-goal{display:flex;flex-direction:column;gap:4px;padding:6px 8px;border:1px solid var(--rule);
+      border-radius:var(--radius-sm);background:var(--panel-2);}
+    .v-goal-head{display:flex;align-items:center;gap:6px;flex-wrap:wrap;}
+    .v-goal-title{font-size:12.5px;color:var(--ink);}
+    .v-bar{height:6px;border-radius:999px;background:var(--panel-4);overflow:hidden;}
+    .v-bar-fill{height:100%;background:var(--accent);border-radius:999px;}
+    /* context view */
+    .v-context{display:flex;flex-direction:column;gap:12px;}
+    .v-meter-head{display:flex;align-items:baseline;justify-content:space-between;gap:8px;}
+    .v-meter-big{font-family:var(--mono);font-size:18px;color:var(--ink);}
+    .v-meter-sub{font-size:11px;color:var(--ink-3);}
+    .v-meter{height:9px;border-radius:999px;background:var(--panel-4);overflow:hidden;margin-top:5px;}
+    .v-meter-fill{height:100%;background:linear-gradient(90deg,var(--accent),var(--accent-glow));border-radius:999px;}
+    .v-note{font-size:11px;color:var(--ink-3);line-height:1.5;}
+    .v-evict{border-left:2px solid var(--rule);padding:2px 0 2px 8px;font-size:11.5px;color:var(--ink-2);}
+    .v-evict-role{font-family:var(--mono);font-size:9.5px;text-transform:uppercase;color:var(--ink-3);}
+    /* wiki view */
+    .v-wiki{display:flex;flex-direction:column;gap:10px;min-height:0;}
+    .v-wiki-search{width:100%;box-sizing:border-box;padding:6px 9px;border:1px solid var(--rule);
+      border-radius:var(--radius-sm);background:var(--panel-2);color:var(--ink);font-size:12.5px;font-family:inherit;}
+    .v-wiki-list{display:flex;flex-direction:column;gap:6px;max-height:52vh;overflow:auto;}
+    .v-wiki-item{display:flex;flex-direction:column;gap:3px;padding:7px 9px;border:1px solid var(--rule);
+      border-radius:var(--radius-sm);background:var(--panel-2);cursor:pointer;}
+    .v-wiki-item:hover{border-color:var(--accent-glow);}
+    .v-wiki-title{font-size:13px;color:var(--ink);display:flex;align-items:center;gap:6px;}
+    .v-wiki-tags{display:flex;gap:4px;flex-wrap:wrap;}
+    .v-tag-sm{font-family:var(--mono);font-size:9px;padding:0 4px;border-radius:4px;background:var(--panel-4);color:var(--ink-3);}
+    .v-verified{color:#3fa46b;}
+    .v-wiki-back{align-self:flex-start;}
+    .v-skills{display:flex;flex-direction:column;gap:10px;}
     `;
     const style = document.createElement("style");
     style.id = "ch-views-style";
@@ -822,6 +1331,738 @@
     },
   });
 
+  // ══ Memory views (Phase 3c) ══════════════════════════════════════════════
+  // All read RAW `.crewhaus/` files via the host's `/crewhaus/` route and parse
+  // in the browser (never import @crewhaus/*). They refetch when a
+  // `{type:"memory", surface, …}` WS message for their surface arrives, and on
+  // first mount / when the latched identity (spec, sessionId) becomes known.
+  // Every fetch degrades to an empty-state, never an error.
+
+  function identityOf(api) {
+    const id = (api && api.state && api.state.identity) || {};
+    return { spec: id.specName || null, sessionId: id.sessionId || null };
+  }
+  function memUrl(path) {
+    return encodeURI("/crewhaus/" + String(path).replace(/^\/+/, ""));
+  }
+  function fetchText(url) {
+    return fetch(url).then((r) => (r.ok ? r.text() : Promise.reject(new Error(String(r.status)))));
+  }
+  function fetchJson(url) {
+    return fetch(url).then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))));
+  }
+  function cssEscape(s) {
+    return window.CSS && CSS.escape ? CSS.escape(s) : String(s);
+  }
+  function hint(text) {
+    return CH.el("div", { class: "panel-hint", text });
+  }
+  function truncate(s, n) {
+    s = String(s == null ? "" : s);
+    return s.length > n ? s.slice(0, n) + "…" : s;
+  }
+  function normalizePlanId(id) {
+    const m = String(id || "").match(/plan-\d{4}/);
+    return m ? m[0] : String(id || "");
+  }
+  /** A ladder-status pill (open/in_progress/claimed/proven/confirmed/dropped).
+      claimed and proven are visibly distinct — the whole point of the ladder. */
+  function statusChip(status) {
+    const meta = statusMeta(status);
+    const kids = [CH.el("span", { text: meta.label })];
+    if (meta.note) kids.push(CH.el("span", { class: "v-chip-note", text: `· ${meta.note}` }));
+    return CH.el("span", { class: `v-chip ${meta.cls}` }, kids);
+  }
+
+  // ── Focus view ───────────────────────────────────────────────────────────
+  function reqRow(r) {
+    return CH.el("div", { class: "v-req", dataset: { req: r.id } }, [
+      CH.el("div", { class: "v-req-head" }, [
+        CH.el("span", { class: "v-req-id", text: r.id }),
+        statusChip(r.status),
+      ]),
+      // The user's own verbatim words (survive compaction) — textContent only,
+      // never markdown/innerHTML, so they render faithfully and safely.
+      CH.el("div", { class: "v-req-text v-req-quote", text: r.text }),
+      CH.el("div", { class: "v-req-src", text: `${r.sessionId} · turn ${r.turn}` }),
+    ]);
+  }
+  function renderFocus(wrap, api) {
+    const { spec } = identityOf(api);
+    CH.clear(wrap);
+    if (!spec) {
+      wrap.appendChild(empty("No focus yet — the agent hasn't started a session."));
+      return;
+    }
+    wrap.appendChild(empty("Loading focus…"));
+    const base = `state/${spec}`;
+    Promise.allSettled([
+      fetchText(memUrl(`${base}/focus.md`)),
+      fetchText(memUrl(`${base}/handoff.md`)),
+    ]).then(([f, h]) => {
+      const focus =
+        f.status === "fulfilled"
+          ? parseFocus(f.value)
+          : { present: false, body: "", activePlan: null, requirements: [], ledgerTruncated: false };
+      const nextActions = h.status === "fulfilled" ? parseHandoffNextActions(h.value) : [];
+      CH.clear(wrap);
+      if (!focus.present || (!focus.body && !focus.requirements.length && !focus.activePlan)) {
+        wrap.appendChild(
+          empty(
+            "No focus set yet. The agent records its current focus, the active plan, and the requirements it's tracking here.",
+          ),
+        );
+        return;
+      }
+      if (focus.body) {
+        const body = CH.el("div", { class: "md v-focus-body" });
+        CH.mdInto(body, focus.body); // model-influenced → safe markdown, never innerHTML
+        wrap.appendChild(section("Focus", [body]));
+      }
+      const ap = focus.activePlan
+        ? CH.el("div", { class: "v-active-plan" }, [
+            CH.icon("list", 13),
+            CH.el("a", {
+              class: "ch-link",
+              href: "#",
+              text: focus.activePlan,
+              onClick: (e) => {
+                e.preventDefault();
+                P.open("plan", { id: focus.activePlan });
+              },
+            }),
+          ])
+        : empty("No active plan.");
+      wrap.appendChild(section("Active plan", [ap]));
+
+      const counts = summarizeRequirements(focus.requirements);
+      const countRow = CH.el("div", { class: "v-counts" }, [
+        CH.el("span", { class: "v-chip st-open", text: `${counts.open} open` }),
+        CH.el("span", { class: "v-chip st-confirmed", text: `${counts.confirmed} confirmed` }),
+        CH.el("span", { class: "v-chip st-dropped", text: `${counts.dropped} dropped` }),
+      ]);
+      const rows = focus.requirements.length
+        ? focus.requirements.map(reqRow)
+        : [empty("No requirements tracked yet.")];
+      const reqKids = [countRow].concat(rows);
+      if (focus.ledgerTruncated) reqKids.push(hint("ledger truncated — oldest requirements dropped"));
+      wrap.appendChild(section("Requirements", reqKids));
+
+      if (nextActions.length) {
+        const ul = CH.el(
+          "ul",
+          { class: "panel-list" },
+          nextActions.map((a) => CH.el("li", { text: a })),
+        );
+        wrap.appendChild(section("Next actions", [ul]));
+      }
+    });
+  }
+
+  P.register({
+    id: "focus",
+    title: "Focus",
+    icon: "star",
+    order: 16,
+    feature: P.VIEW_FEATURES.focus,
+    mount(el, api) {
+      API = api;
+      ensureStyles();
+      const wrap = CH.el("div", { class: "v-focus panel-view" });
+      el.appendChild(wrap);
+      renderFocus(wrap, api);
+      let sig = identityOf(api).spec;
+      api.onState(() => {
+        const s = identityOf(api).spec;
+        if (s !== sig) {
+          sig = s;
+          renderFocus(wrap, api);
+        }
+      });
+    },
+    update(el, api, msg) {
+      const wrap = el.querySelector(".v-focus");
+      if (!wrap) return;
+      if (
+        msg.type === "memory" &&
+        (msg.surface === "focus" || msg.surface === "handoff" || msg.surface === "plan")
+      ) {
+        renderFocus(wrap, api);
+      } else if (msg.type === "open" && msg.arg && msg.arg.req) {
+        const row = wrap.querySelector(`.v-req[data-req="${cssEscape(msg.arg.req)}"]`);
+        if (row) row.scrollIntoView({ block: "nearest" });
+      }
+    },
+  });
+
+  // ── Plan view ────────────────────────────────────────────────────────────
+  function stepRow(s) {
+    const main = [
+      CH.el("div", { class: "v-step-head" }, [statusChip(s.status)]),
+      CH.el("div", { class: "v-step-text", text: s.text }),
+    ];
+    if (s.status === "proven" && s.proofs && s.proofs.length) {
+      // proven = machine-verified; show the evidence toolUseId(s).
+      main.push(CH.el("div", { class: "v-proof", text: `proof: ${s.proofs.join(", ")}` }));
+    } else if (s.status === "claimed") {
+      // claimed ≠ proven: a free, unverified claim — say so plainly.
+      main.push(CH.el("div", { class: "v-note", text: "claimed but not machine-verified" }));
+    }
+    return CH.el(
+      "div",
+      {
+        class: `v-step ${s.status === "proven" ? "is-proven" : s.status === "claimed" ? "is-claimed" : ""}`,
+      },
+      [
+        CH.el("span", { class: "v-step-n", text: String(s.n) }),
+        CH.el("div", { class: "v-step-main" }, main),
+      ],
+    );
+  }
+  function goalRow(g) {
+    const kids = [
+      CH.el("div", { class: "v-goal-head" }, [
+        statusChip(g.status),
+        CH.el("span", { class: "v-goal-title", text: g.title }),
+      ]),
+    ];
+    if (typeof g.target === "number") {
+      const cur = typeof g.current === "number" ? g.current : 0;
+      const pct = g.target > 0 ? Math.max(0, Math.min(1, cur / g.target)) : 0;
+      kids.push(hint(`${cur}/${g.target}${g.unit ? " " + g.unit : ""}`));
+      kids.push(
+        CH.el(
+          "div",
+          { class: "v-bar" },
+          CH.el("div", { class: "v-bar-fill", style: { width: `${Math.round(pct * 100)}%` } }),
+        ),
+      );
+    }
+    return CH.el("div", { class: "v-goal" }, kids);
+  }
+  function planCard(plan, isActive) {
+    const fm = plan.frontmatter;
+    const proven = plan.steps.filter((s) => s.status === "proven").length;
+    const head = CH.el("div", {}, [
+      CH.el("div", { class: "v-plan-title", text: fm.title || fm.id }),
+      CH.el("div", {
+        class: "v-plan-meta",
+        text: `${fm.id}${isActive ? " · active" : ""} · ${proven}/${plan.steps.length} steps proven`,
+      }),
+    ]);
+    const steps = plan.steps.length ? plan.steps.map(stepRow) : [empty("No steps yet.")];
+    return CH.el("div", {}, [
+      head,
+      CH.el("div", { class: "panel-list", style: { marginTop: "8px" } }, steps),
+    ]);
+  }
+  function mountPlan(el, api) {
+    API = api;
+    ensureStyles();
+    const wrap = CH.el("div", { class: "v-plan panel-view" });
+    el.appendChild(wrap);
+    const state = { plans: [], activeId: null, selectedId: null, requestedId: null, goals: [] };
+
+    function render() {
+      CH.clear(wrap);
+      if (!identityOf(api).spec) {
+        wrap.appendChild(empty("No plan yet — the agent hasn't started a session."));
+        return;
+      }
+      if (!state.plans.length) {
+        wrap.appendChild(
+          empty(
+            "No plans yet. When the agent creates a plan, its step ladder — open → in progress → claimed → proven — appears here.",
+          ),
+        );
+      } else {
+        if (state.plans.length > 1) {
+          const tabs = state.plans.map((p) => {
+            const id = p.frontmatter.id;
+            return CH.el("button", {
+              class: `v-plan-tab ${id === state.selectedId ? "active" : ""}`,
+              text: id + (id === state.activeId ? " ●" : ""),
+              title: p.frontmatter.title,
+              onClick: () => {
+                state.selectedId = id;
+                render();
+              },
+            });
+          });
+          wrap.appendChild(CH.el("div", { class: "v-plan-switch" }, tabs));
+        }
+        const cur = state.plans.find((p) => p.frontmatter.id === state.selectedId) || state.plans[0];
+        wrap.appendChild(planCard(cur, cur.frontmatter.id === state.activeId));
+      }
+      const openGoals = state.goals.filter((g) => g.status !== "proven");
+      if (openGoals.length) wrap.appendChild(section("Goals", openGoals.map(goalRow)));
+    }
+
+    function refresh() {
+      const spec = identityOf(api).spec;
+      if (!spec) {
+        render();
+        return;
+      }
+      const base = `state/${spec}`;
+      Promise.allSettled([
+        fetchText(memUrl(`${base}/focus.md`)),
+        fetchText(memUrl(`${base}/goals.yaml`)),
+        fetchJson(memUrl(`${base}/plans`)),
+      ]).then(async ([f, g, listing]) => {
+        state.activeId = f.status === "fulfilled" ? parseFocus(f.value).activePlan : null;
+        state.goals = g.status === "fulfilled" ? parseGoals(g.value) : [];
+        const entries =
+          listing.status === "fulfilled" && listing.value && Array.isArray(listing.value.entries)
+            ? listing.value.entries
+            : [];
+        const files = entries.filter((e) => !e.dir && /^plan-\d{4}.*\.md$/.test(e.name));
+        const plans = [];
+        for (const e of files) {
+          try {
+            const txt = await fetchText(memUrl(`${base}/plans/${e.name}`));
+            const p = parsePlan(txt);
+            p.file = e.name;
+            if (p.frontmatter.id) plans.push(p);
+          } catch {
+            /* skip an unreadable plan */
+          }
+        }
+        plans.sort((a, b) => a.frontmatter.id.localeCompare(b.frontmatter.id));
+        state.plans = plans;
+        const want = state.requestedId || state.activeId;
+        const found =
+          want && plans.find((p) => normalizePlanId(p.frontmatter.id) === normalizePlanId(want));
+        state.selectedId =
+          (found && found.frontmatter.id) ||
+          state.activeId ||
+          (plans[0] && plans[0].frontmatter.id) ||
+          null;
+        render();
+      });
+    }
+
+    render();
+    refresh();
+    let sig = identityOf(api).spec;
+    api.onState(() => {
+      const s = identityOf(api).spec;
+      if (s !== sig) {
+        sig = s;
+        refresh();
+      }
+    });
+    el._planRefresh = refresh;
+    el._planSelect = (id) => {
+      state.requestedId = id;
+      const norm = normalizePlanId(id);
+      const found = state.plans.find((p) => normalizePlanId(p.frontmatter.id) === norm);
+      if (found) {
+        state.selectedId = found.frontmatter.id;
+        render();
+      } else {
+        refresh();
+      }
+    };
+  }
+
+  P.register({
+    id: "plan",
+    title: "Plan",
+    icon: "list",
+    order: 18,
+    feature: P.VIEW_FEATURES.plan,
+    mount: mountPlan,
+    update(el, api, msg) {
+      if (
+        msg.type === "memory" &&
+        (msg.surface === "plan" || msg.surface === "goals" || msg.surface === "focus")
+      ) {
+        if (typeof el._planRefresh === "function") el._planRefresh();
+      } else if (msg.type === "open" && msg.arg && msg.arg.id && typeof el._planSelect === "function") {
+        el._planSelect(msg.arg.id);
+      }
+    },
+  });
+
+  // ── Context view (MVP §10.4) ─────────────────────────────────────────────
+  function renderContextMeter(box, api) {
+    const evs = eventsOf();
+    const acc = accumulateContext(evs);
+    const comps = collectCompactions(evs);
+    CH.clear(box);
+    const pct = Math.max(0, Math.min(1, acc.cumulativeInput / NOMINAL_CONTEXT_WINDOW));
+    const meter = CH.el("div", {}, [
+      CH.el("div", { class: "v-meter-head" }, [
+        CH.el("span", { class: "v-meter-big", text: CH.fmtTokens(acc.cumulativeInput) }),
+        CH.el("span", { class: "v-meter-sub", text: `of ~${CH.fmtTokens(NOMINAL_CONTEXT_WINDOW)} nominal` }),
+      ]),
+      CH.el(
+        "div",
+        { class: "v-meter" },
+        CH.el("div", { class: "v-meter-fill", style: { width: `${(pct * 100).toFixed(1)}%` } }),
+      ),
+      CH.el("div", {
+        class: "v-note",
+        text:
+          "Estimate. Cumulative input tokens sent across the session — there is no true context-window event yet, so this is a proxy, not live window occupancy.",
+      }),
+    ]);
+    box.appendChild(section("Context (cumulative input)", [meter]));
+
+    const dl = CH.el("dl", { class: "panel-dl" });
+    drow(dl, "Last turn input", acc.turns ? CH.fmtTokens(acc.lastInput) : null);
+    drow(dl, "Peak turn input", acc.turns ? CH.fmtTokens(acc.peakInput) : null);
+    drow(dl, "Output total", CH.fmtTokens(acc.cumulativeOutput));
+    drow(dl, "Model turns", acc.turns);
+    if (acc.lastCacheRead) drow(dl, "Last cache read", CH.fmtTokens(acc.lastCacheRead));
+    box.appendChild(section("This session", [dl]));
+
+    if (comps.length) {
+      const rows = comps
+        .slice(-8)
+        .reverse()
+        .map((c) =>
+          CH.el("div", { class: "v-row" }, [
+            CH.el("span", { class: "v-row-ic" }, CH.icon("scissors", 13)),
+            CH.el("div", { class: "v-row-main" }, [
+              CH.el("div", { class: "v-row-title" }, [
+                CH.el("span", { class: "v-row-name", text: c.subKind || "compaction" }),
+              ]),
+              CH.el("div", {
+                class: "v-row-sub",
+                text: `${c.before == null ? "?" : c.before} → ${c.after == null ? "?" : c.after} messages${c.phase ? " · " + c.phase : ""}`,
+              }),
+            ]),
+          ]),
+        );
+      box.appendChild(section(`Compactions (${comps.length})`, rows));
+    }
+  }
+  function fetchEvictions(box, api) {
+    const { sessionId } = identityOf(api);
+    if (!sessionId) {
+      CH.clear(box);
+      return;
+    }
+    fetchText(memUrl(`sessions/${sessionId}.jsonl`))
+      .then((t) => sessionEvictions(parseJsonl(t)))
+      .then((ev) => {
+        CH.clear(box);
+        if (!ev.length) return;
+        const rows = ev
+          .slice(-8)
+          .reverse()
+          .map((e) =>
+            CH.el("div", { class: "v-evict" }, [
+              CH.el("span", {
+                class: "v-evict-role",
+                text: e.role + (e.turnNumber != null ? ` · turn ${e.turnNumber}` : ""),
+              }),
+              CH.el("div", { text: truncate(e.text, 240) }),
+            ]),
+          );
+        box.appendChild(section(`Evicted from context (${ev.length})`, rows));
+      })
+      .catch(() => {
+        CH.clear(box);
+      });
+  }
+
+  P.register({
+    id: "context",
+    title: "Context",
+    icon: "cpu",
+    order: 22,
+    feature: P.VIEW_FEATURES.context,
+    mount(el, api) {
+      API = api;
+      ensureStyles();
+      const meterBox = CH.el("div", { class: "v-context-meter" });
+      const evictBox = CH.el("div", { class: "v-context-evict" });
+      el.appendChild(CH.el("div", { class: "v-context panel-view" }, [meterBox, evictBox]));
+      renderContextMeter(meterBox, api);
+      fetchEvictions(evictBox, api);
+      let sig = identityOf(api).sessionId;
+      api.onState(() => {
+        const s = identityOf(api).sessionId;
+        if (s !== sig) {
+          sig = s;
+          fetchEvictions(evictBox, api);
+        }
+      });
+    },
+    update(el, api, msg) {
+      const meterBox = el.querySelector(".v-context-meter");
+      const evictBox = el.querySelector(".v-context-evict");
+      if (!meterBox) return;
+      if (
+        msg.type === "event" &&
+        msg.event &&
+        (msg.event.kind === "model_response" || msg.event.kind === "compaction_fired")
+      ) {
+        renderContextMeter(meterBox, api);
+      } else if (msg.type === "memory" && msg.surface === "session") {
+        fetchEvictions(evictBox, api);
+      }
+    },
+  });
+
+  // ── Wiki view ────────────────────────────────────────────────────────────
+  function mountWiki(el, api) {
+    API = api;
+    ensureStyles();
+    const wrap = CH.el("div", { class: "v-wiki panel-view" });
+    el.appendChild(wrap);
+    const state = { list: [], query: "", pendingSlug: null };
+
+    function wikiItem(r) {
+      const titleKids = [CH.el("span", { text: r.title })];
+      if (r.verified)
+        titleKids.push(CH.el("span", { class: "v-verified", title: "verified" }, CH.icon("check", 12)));
+      const meta = [];
+      if (r.version != null) meta.push(CH.el("span", { class: "v-tag-sm", text: `v${r.version}` }));
+      if (r.confidence != null)
+        meta.push(CH.el("span", { class: "v-tag-sm", text: `conf ${r.confidence.toFixed(2)}` }));
+      if (r.status) meta.push(CH.el("span", { class: "v-tag-sm", text: r.status }));
+      const tags = r.tags.slice(0, 6).map((t) => CH.el("span", { class: "v-tag-sm", text: `#${t}` }));
+      return CH.el("div", { class: "v-wiki-item", onClick: () => openArticle(r.slug) }, [
+        CH.el("div", { class: "v-wiki-title" }, titleKids),
+        meta.length || tags.length
+          ? CH.el("div", { class: "v-wiki-tags" }, meta.concat(tags))
+          : null,
+      ]);
+    }
+    function renderList() {
+      CH.clear(wrap);
+      if (!identityOf(api).spec) {
+        wrap.appendChild(empty("No wiki yet — the agent hasn't started a session."));
+        return;
+      }
+      const search = CH.el("input", {
+        class: "v-wiki-search",
+        type: "search",
+        placeholder: "Search articles…",
+        value: state.query,
+      });
+      const listBox = CH.el("div", { class: "v-wiki-list" });
+      function drawItems() {
+        CH.clear(listBox);
+        const rows = sortWiki(filterWiki(state.list, state.query));
+        if (!rows.length) {
+          listBox.appendChild(empty(state.list.length ? "No articles match." : "No wiki articles yet."));
+          return;
+        }
+        for (const r of rows) listBox.appendChild(wikiItem(r));
+      }
+      search.addEventListener("input", () => {
+        state.query = search.value;
+        drawItems();
+      });
+      wrap.appendChild(search);
+      wrap.appendChild(listBox);
+      drawItems();
+    }
+    function loadInto(body, url) {
+      CH.clear(body);
+      body.appendChild(empty("Loading…"));
+      fetchText(url)
+        .then((txt) => {
+          CH.clear(body);
+          CH.mdInto(body, stripFrontmatter(txt)); // model-authored → safe md
+        })
+        .catch(() => {
+          CH.clear(body);
+          body.appendChild(empty("Could not load this article."));
+        });
+    }
+    function openArticle(slug) {
+      const spec = identityOf(api).spec;
+      if (!spec) return;
+      CH.clear(wrap);
+      const back = CH.el(
+        "button",
+        { class: "btn ghost sm v-wiki-back", onClick: renderList },
+        [CH.el("span", { text: "← Back to articles" })],
+      );
+      const body = CH.el("div", { class: "md" });
+      const histBox = CH.el("div", {});
+      wrap.appendChild(back);
+      wrap.appendChild(body);
+      wrap.appendChild(histBox);
+      loadInto(body, memUrl(`wiki/${spec}/articles/${slug}.md`));
+      fetchJson(memUrl(`wiki/${spec}/versions/${slug}`))
+        .then((listing) => {
+          const entries =
+            listing && Array.isArray(listing.entries) ? listing.entries.filter((e) => !e.dir) : [];
+          if (!entries.length) return;
+          const links = entries
+            .slice()
+            .sort((a, b) => b.name.localeCompare(a.name, undefined, { numeric: true }))
+            .map((e) =>
+              CH.el("a", {
+                class: "ch-link",
+                href: "#",
+                text: e.name.replace(/\.md$/, ""),
+                onClick: (ev) => {
+                  ev.preventDefault();
+                  loadInto(body, memUrl(`wiki/${spec}/versions/${slug}/${e.name}`));
+                },
+              }),
+            );
+          histBox.appendChild(section("Version history", [CH.el("div", { class: "v-wiki-tags" }, links)]));
+        })
+        .catch(() => {
+          /* no versions dir — fine */
+        });
+    }
+    function refresh() {
+      const spec = identityOf(api).spec;
+      if (!spec) {
+        renderList();
+        return;
+      }
+      fetchJson(memUrl(`wiki/${spec}/index.json`))
+        .then((j) => {
+          state.list = parseWikiIndex(j);
+        })
+        .catch(() => {
+          state.list = [];
+        })
+        .then(() => {
+          if (state.pendingSlug) {
+            const s = state.pendingSlug;
+            state.pendingSlug = null;
+            openArticle(s);
+          } else {
+            renderList();
+          }
+        });
+    }
+
+    renderList();
+    refresh();
+    let sig = identityOf(api).spec;
+    api.onState(() => {
+      const s = identityOf(api).spec;
+      if (s !== sig) {
+        sig = s;
+        refresh();
+      }
+    });
+    el._wikiRefresh = refresh;
+    el._wikiOpen = (slug) => {
+      if (identityOf(api).spec) openArticle(slug);
+      else state.pendingSlug = slug;
+    };
+  }
+
+  P.register({
+    id: "wiki",
+    title: "Wiki",
+    icon: "book",
+    order: 24,
+    feature: P.VIEW_FEATURES.wiki,
+    mount: mountWiki,
+    update(el, api, msg) {
+      if (msg.type === "memory" && msg.surface === "wiki" && typeof el._wikiRefresh === "function") {
+        el._wikiRefresh();
+      } else if (msg.type === "open" && msg.arg && msg.arg.slug && typeof el._wikiOpen === "function") {
+        el._wikiOpen(msg.arg.slug);
+      }
+    },
+  });
+
+  // ── Skills view ──────────────────────────────────────────────────────────
+  // Skills IN USE this session. The authoritative names come from the durable
+  // session JSONL (`tool_use` with name "Skill" → input.name); the live trace
+  // only gives a count (tool_call_start carries no args). The list of AVAILABLE
+  // skills has no host route/event today (skills are discovered at runtime via
+  // `discoverSkills`), so surfacing them needs a future host discoverSkills
+  // endpoint — flagged in-view, not faked here.
+  function renderSkills(wrap, api) {
+    const { sessionId } = identityOf(api);
+    const liveCount = countSkillCalls(eventsOf());
+    CH.clear(wrap);
+    if (!sessionId) {
+      wrap.appendChild(empty("No skills used yet this session."));
+      if (liveCount) wrap.appendChild(hint(`${liveCount} Skill call(s) seen live`));
+      return;
+    }
+    wrap.appendChild(empty("Loading skills…"));
+    fetchText(memUrl(`sessions/${sessionId}.jsonl`))
+      .then((t) => aggregateSkills(parseJsonl(t)))
+      .then((skills) => {
+        CH.clear(wrap);
+        if (!skills.length) {
+          wrap.appendChild(
+            empty(
+              "No skills used this session yet. Skills the agent invokes via the Skill tool appear here.",
+            ),
+          );
+          if (liveCount)
+            wrap.appendChild(hint(`${liveCount} Skill call(s) seen live (names load from the session log)`));
+          return;
+        }
+        const rows = skills.map((s) =>
+          CH.el("div", { class: "v-row" }, [
+            CH.el("span", { class: "v-row-ic" }, CH.icon("sparkles", 13)),
+            CH.el("div", { class: "v-row-main" }, [
+              CH.el("div", { class: "v-row-title" }, [
+                CH.el("span", { class: "v-row-name", text: s.name }),
+              ]),
+            ]),
+            CH.el("span", { class: "v-tag", text: `×${s.count}` }),
+          ]),
+        );
+        wrap.appendChild(section("Skills used this session", rows));
+        wrap.appendChild(hint('“Available skills” needs host support (discoverSkills) — not surfaced yet.'));
+      })
+      .catch(() => {
+        CH.clear(wrap);
+        wrap.appendChild(empty("No skills used this session yet."));
+      });
+  }
+
+  P.register({
+    id: "skills",
+    title: "Skills",
+    icon: "sparkles",
+    order: 26,
+    feature: P.VIEW_FEATURES.skills,
+    mount(el, api) {
+      API = api;
+      ensureStyles();
+      const wrap = CH.el("div", { class: "v-skills panel-view" });
+      el.appendChild(wrap);
+      renderSkills(wrap, api);
+      let sig = identityOf(api).sessionId;
+      api.onState(() => {
+        const s = identityOf(api).sessionId;
+        if (s !== sig) {
+          sig = s;
+          renderSkills(wrap, api);
+        }
+      });
+    },
+    update(el, api, msg) {
+      const wrap = el.querySelector(".v-skills");
+      if (!wrap) return;
+      if (msg.type === "memory" && msg.surface === "session") renderSkills(wrap, api);
+      else if (
+        msg.type === "event" &&
+        msg.event &&
+        msg.event.kind === "tool_call_end" &&
+        msg.event.toolName === "Skill"
+      )
+        renderSkills(wrap, api);
+    },
+    badge() {
+      const n = countSkillCalls(eventsOf());
+      return n || null;
+    },
+  });
+
   // ── Chat-link matchers (requirement 4) ───────────────────────────────────
   // Images/data files the default matcher misses → the files viewer.
   P.linkify(EXTRA_FILE_RE, (m) => ({ view: "files", arg: { path: m[0] } }));
@@ -835,6 +2076,9 @@
     }
     return matchTaskNames(text, taskNames);
   });
+  // REQ ledger ids mentioned in chat → the focus view (where the ledger lives).
+  // Inert until the focus view is registered+enabled (applyLinks gates on that).
+  P.linkify(/\bREQ-\d{3,}\b/g, (m) => ({ view: "focus", arg: { req: m[0] } }));
 
   // Inject the view styles now (guarded for the DOM-less test env) rather than
   // lazily on first mount, so panel styling is present before the first open.
@@ -850,6 +2094,25 @@
     matchTaskNames,
     toolKey,
     EXTRA_FILE_RE,
+    // Phase 3c memory-file parsers + derivations (all DOM-free, unit-tested).
+    parseFocus,
+    summarizeRequirements,
+    parsePlan,
+    parseGoals,
+    statusMeta,
+    parseHandoffNextActions,
+    parseWikiIndex,
+    filterWiki,
+    sortWiki,
+    stripFrontmatter,
+    parseJsonl,
+    sessionEvictions,
+    aggregateSkills,
+    countSkillCalls,
+    accumulateContext,
+    collectCompactions,
+    normalizePlanId,
+    NOMINAL_CONTEXT_WINDOW,
     _taskNames: taskNames,
   };
 })();
