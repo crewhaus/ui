@@ -171,6 +171,34 @@
       if (s0) applyAccent(s0);
     }
 
+    // ── Light / dark theme toggle (decision §10.5) ───────────────────────
+    // Sits next to the accent chooser. Dark is the default; light is an
+    // opt-in `[data-theme]` layer (never a prefers-color-scheme auto-switch).
+    // The theme helper + light token set live in CH.panels / ui.css so the
+    // logic is shared and unit-testable; this button is only the trigger.
+    const themeBtn = el("button", {
+      class: "btn ghost sm icon-only",
+      title: "Toggle light / dark",
+      "aria-label": "Toggle light / dark theme",
+    });
+    function themeApi() {
+      return window.CH.panels && window.CH.panels.theme;
+    }
+    function syncThemeBtn() {
+      const t = (themeApi() && themeApi().read()) || "dark";
+      window.CH.clear(themeBtn);
+      themeBtn.appendChild(icon(t === "light" ? "moon" : "sun", 15));
+      themeBtn.title = t === "light" ? "Switch to dark theme" : "Switch to light theme";
+    }
+    themeBtn.addEventListener("click", () => {
+      if (themeApi()) themeApi().toggle();
+      syncThemeBtn();
+    });
+    // Apply the saved theme pre-paint (avoid a light/dark flash), then label
+    // the button to match.
+    if (themeApi()) themeApi().apply(themeApi().read());
+    syncThemeBtn();
+
     // ── Header ───────────────────────────────────────────────────────────
     const statusEl = el("div", { class: "status", dataset: { state: "offline" } });
     setStatus(statusEl, "offline");
@@ -210,6 +238,7 @@
       actions,
       statusEl,
       paletteBtn,
+      themeBtn,
       logBtn,
     ]);
 
@@ -247,7 +276,14 @@
       drawer.style.display = logOpen ? "flex" : "none";
     }
 
-    const shell = el("div", { class: "app" }, [header, main, drawer]);
+    // The right-side panel host (CH.panels). It stays display:none until a
+    // shape enables ≥1 view via config.features[], so shapes that register no
+    // views keep an identical layout — `main` alone fills the row exactly as a
+    // lone grid cell used to. On narrow widths the pane becomes an overlay.
+    const panelHost = el("div", { class: "panel-host" });
+    const bodyRow = el("div", { class: "app-main-row" }, [main, panelHost]);
+
+    const shell = el("div", { class: "app" }, [header, bodyRow, drawer]);
     window.CH.clear(root);
     root.appendChild(shell);
 
@@ -356,6 +392,11 @@
     // Failure cards built by CH.events (which has no api handle) use this to
     // open the raw-output drawer. One app per page, so a global slot is safe.
     window.CH.openRawLog = api.openLog;
+
+    // Bring up the right-side panel host (registry, rail, gating, chat-links).
+    // Init before build() so a shape's build(api) can register views; the host
+    // stays hidden until features[] enables at least one.
+    if (window.CH.panels) window.CH.panels.init(api, panelHost);
 
     spec.build(api);
     conn.connect();

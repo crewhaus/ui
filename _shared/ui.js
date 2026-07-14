@@ -122,6 +122,11 @@
     thumbsDown:
       '<path d="M17 14V2"/><path d="M9 18.12 10 14H4.17a2 2 0 0 1-1.92-2.56l2.33-8A2 2 0 0 1 6.5 2H20a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2.76a2 2 0 0 0-1.79 1.11L12 22a3.13 3.13 0 0 1-3-3.88Z"/>',
     star: '<polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>',
+    panelRight:
+      '<rect width="18" height="18" x="3" y="3" rx="2"/><path d="M15 3v18"/>',
+    sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/>',
+    moon: '<path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>',
+    list: '<path d="M3 12h.01M3 18h.01M3 6h.01M8 12h13M8 18h13M8 6h13"/>',
   };
   const _iconCache = {};
   function iconTemplate(name) {
@@ -286,6 +291,12 @@
   function mdInto(node, src) {
     clear(node);
     node.appendChild(md(src));
+    // Chat-link routing: after safe markdown is in the DOM, let the panel
+    // system turn referenced files / plan ids / wiki slugs into real anchor
+    // nodes wired to CH.panels.open(...). No-op until panels.js registers
+    // matchers; still innerHTML-free (it only rewrites text nodes).
+    const panels = window.CH.panels;
+    if (panels && typeof panels._applyLinks === "function") panels._applyLinks(node);
     return node;
   }
 
