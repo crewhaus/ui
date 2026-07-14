@@ -339,10 +339,6 @@
       color:var(--ink);white-space:pre-wrap;word-break:break-word;overflow:auto;max-height:56vh;}
     .v-file-img{max-width:100%;height:auto;border:1px solid var(--rule);border-radius:var(--radius-sm);background:#fff;}
     .v-art .v-row{cursor:default;}
-    /* Reconciliation: the Phase-3a default file-link matcher targets the view
-       id "file"; we register a hidden "file" alias that redirects to "files"
-       so those links open the (plural) files viewer. Hide its rail button. */
-    .panel-rail-btn[data-view="file"]{display:none !important;}
     `;
     const style = document.createElement("style");
     style.id = "ch-views-style";
@@ -746,27 +742,6 @@
     },
   });
 
-  // Reconciliation alias: the Phase-3a default file-link matcher (in panels.js,
-  // pinned by test/panels.test.ts) resolves to the view id "file" (singular),
-  // while this view + CH.panels.VIEW_FEATURES use "files" (plural). Rather than
-  // edit the frozen framework, register a hidden "file" alias that forwards to
-  // "files" so every default file-path chat link opens the real viewer. Its
-  // rail button is hidden via CSS (ensureStyles).
-  P.register({
-    id: "file",
-    title: "Files",
-    icon: "folder",
-    order: 999,
-    feature: P.VIEW_FEATURES.files,
-    mount(el) {
-      ensureStyles();
-      el.appendChild(empty("Opening files…"));
-    },
-    update(el, api, msg) {
-      if (msg.type === "open") P.open("files", msg.arg);
-    },
-  });
-
   // ── Artifacts view ───────────────────────────────────────────────────────
   function groupBy(arr, keyFn) {
     const out = {};
@@ -861,9 +836,8 @@
     return matchTaskNames(text, taskNames);
   });
 
-  // Inject the view + alias-hiding styles now (guarded for the DOM-less test
-  // env) rather than lazily on first mount, so the hidden "file" alias rail
-  // button never flashes before a view is opened.
+  // Inject the view styles now (guarded for the DOM-less test env) rather than
+  // lazily on first mount, so panel styling is present before the first open.
   ensureStyles();
 
   // ── Export pure helpers for the unit tests ───────────────────────────────

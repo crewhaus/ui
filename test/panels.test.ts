@@ -129,8 +129,8 @@ describe("scanLinks — chat-link matcher", () => {
     const hits = panels.scanLinks("edit src/app.ts for plan-0003 and see [[design-notes]]");
     const byView: Record<string, Hit> = {};
     for (const h of hits) byView[h.view] = h;
-    expect(byView.file?.text).toBe("src/app.ts");
-    expect((byView.file?.arg as { path: string }).path).toBe("src/app.ts");
+    expect(byView.files?.text).toBe("src/app.ts");
+    expect((byView.files?.arg as { path: string }).path).toBe("src/app.ts");
     expect(byView.plan?.text).toBe("plan-0003");
     expect((byView.plan?.arg as { id: string }).id).toBe("plan-0003");
     expect(byView.wiki?.text).toBe("design-notes"); // brackets stripped for display

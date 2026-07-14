@@ -263,7 +263,7 @@
   // point every feed/chat mention becomes a live link with no extra wiring.
   linkify(
     /(?:[\w.\-]+\/)*[\w.\-]+\.(?:ts|tsx|js|jsx|json|md|ya?ml|toml|txt|py|css|html|sh|lock)\b/g,
-    (m) => ({ view: "file", arg: { path: m[0] } }),
+    (m) => ({ view: "files", arg: { path: m[0] } }),
   );
   linkify(/\bplan-\d{3,4}(?:-[a-z0-9-]+)?\b/g, (m) => ({ view: "plan", arg: { id: m[0] } }));
   linkify(/\[\[([a-z0-9][a-z0-9/_-]*)\]\]/gi, (m) => ({
