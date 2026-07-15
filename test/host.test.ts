@@ -242,6 +242,28 @@ describe("identity latch + event replay", () => {
     expect((sup.snapshot().identity as { sessionId?: string }).sessionId).toBe(SESSION_ID);
   });
 
+  test("re-broadcasts identity mid-run on the FIRST sessionId latch", async () => {
+    // Regression: the sessionId latches from the first trace envelope, which
+    // arrives AFTER the "running" status (so that status carried a null id).
+    // Without a re-broadcast, sessionId-keyed memory views (skills, context
+    // evictions) can't fetch `.crewhaus/sessions/<id>.jsonl` until the run ends.
+    const ev = envelope("turn_start", { turn: 1, messageCount: 1 });
+    const dir = makeHarness(
+      "latch-rebroadcast",
+      `console.log(JSON.stringify(${JSON.stringify(ev)}));\nprocess.exit(0);\n`,
+    );
+    const { messages } = await runCollectingSup(dir);
+    // A NON-terminal status must carry the latched id (not just the final
+    // "exited" one) — that is the push the client adopts to populate the views.
+    const midRun = messages.find(
+      (m) =>
+        m.type === "status" &&
+        m.state !== "exited" &&
+        (m.identity as { sessionId?: string } | undefined)?.sessionId === SESSION_ID,
+    );
+    expect(midRun).toBeDefined();
+  });
+
   test("buffers this run's trace events for replay to a late subscriber", async () => {
     const a = envelope("turn_start", { turn: 1, messageCount: 1 });
     const b = envelope("turn_end", { turn: 1, durationMs: 5, stopReason: "end_turn" });

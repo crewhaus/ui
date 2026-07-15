@@ -1004,11 +1004,26 @@ export class Supervisor {
    * the last `run_failed`, and buffering it for reconnect replay.
    */
   private emitEvent(ev: Record<string, unknown>) {
+    const hadSession = this.sessionId;
     if (typeof ev.sessionId === "string" && ev.sessionId) this.sessionId = ev.sessionId;
     if (ev.kind === "run_failed") this.lastRunFailed = ev;
     this.eventRing.push(ev);
     if (this.eventRing.length > EVENT_RING_MAX) this.eventRing.shift();
     this.broadcast({ type: "event", event: ev });
+    // The sessionId latches from the FIRST trace envelope — which arrives AFTER
+    // the "running" status broadcast, so that status carried a null sessionId.
+    // Push the freshly-known identity the moment it appears so sessionId-keyed
+    // memory views (skills, context evictions) can fetch
+    // `.crewhaus/sessions/<id>.jsonl` without waiting for the next lifecycle
+    // transition (which might be the run ENDING).
+    if (!hadSession && this.sessionId) {
+      this.broadcast({
+        type: "status",
+        state: this.state,
+        detail: this.lastDetail,
+        identity: this.identity(),
+      });
+    }
   }
 
   private log(line: string, stream: "stdout" | "stderr" | "system" = "system") {

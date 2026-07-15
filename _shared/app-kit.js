@@ -307,6 +307,11 @@
     });
     conn.on("status", (msg) => {
       live.state = msg.state;
+      // Status carries the latched identity (sessionId + specName); adopt it so
+      // sessionId-keyed memory views populate the moment the session id is known
+      // (the host re-broadcasts a status on the first latch). "state" already
+      // replaces `live` wholesale, so it needs no equivalent.
+      if (msg.identity) live.identity = msg.identity;
       setStatus(statusEl, msg.state, statusDetail(msg));
       refreshControls();
       // A crash auto-opens the raw-output drawer — the stderr/stack the user
