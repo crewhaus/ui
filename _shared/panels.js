@@ -10,8 +10,7 @@
    This module is the FRAMEWORK only (Phase 3a). The real views (files, plan,
    focus, wiki, tools, …) land in Phase 3b/3c; here we ship the registry, the
    features[]-driven gating, the chat-link routing hook, the light/dark theme
-   helper, and two trivial built-in demo views so the framework is
-   demonstrably working end-to-end.
+   helper. Views themselves are registered by _shared/views.js.
 
    Public surface (attached as window.CH.panels):
      init(api, hostEl)                     — called once by app-kit
@@ -513,93 +512,7 @@
     api.on("user", (m) => onMsg("user", m));
     api.on("status", (m) => onMsg("status", m));
     api.onState(() => refreshGating());
-    registerBuiltins();
     refreshGating();
-  }
-
-  // ── Built-in demo views (Phase-3a proof; real views ship in 3b/3c) ───────
-  // Gated on features that only the cli reference shape declares ("tools" and
-  // "chat"), so all 17 other shapes enable zero views and stay pixel-identical.
-  function registerBuiltins() {
-    // Activity: mirror the last handful of trace events, reusing the shared
-    // event-card renderer. Proves update(msg) + badge() + recent() backfill.
-    register({
-      id: "activity",
-      title: "Activity",
-      icon: "activity",
-      order: 10,
-      feature: "tools",
-      mount(el) {
-        const list = CH.el("div", { class: "panel-list" });
-        el.appendChild(
-          CH.el("div", { class: "panel-section" }, [
-            CH.el("div", { class: "panel-hint", text: "Recent trace events" }),
-            list,
-          ]),
-        );
-        for (const m of recent("event").slice(-8)) appendEv(list, m.event);
-        if (!list.firstChild)
-          list.appendChild(CH.el("div", { class: "panel-empty", text: "No events yet." }));
-      },
-      update(el, api, msg) {
-        if (msg.type !== "event") return;
-        const list = el.querySelector(".panel-list");
-        const empty = list.querySelector(".panel-empty");
-        if (empty) empty.remove();
-        appendEv(list, msg.event);
-        while (list.childElementCount > 12) list.removeChild(list.firstChild);
-      },
-      badge() {
-        const n = recent("event").filter(
-          (m) => m.event && !CH.events.FEED_SKIP.has(m.event.kind),
-        ).length;
-        return n || null;
-      },
-    });
-
-    // Session: the latched identity + live run state from Phase 1. Proves a
-    // view that reads api.state (identity {sessionId, specName}) and reacts to
-    // state/status messages.
-    register({
-      id: "session",
-      title: "Session",
-      icon: "eye",
-      order: 20,
-      feature: "chat",
-      mount(el) {
-        el.appendChild(CH.el("dl", { class: "panel-dl" }));
-        renderSession(el);
-      },
-      update(el, api, msg) {
-        if (msg.type === "state" || msg.type === "status" || msg.type === "memory")
-          renderSession(el);
-      },
-    });
-  }
-
-  function appendEv(list, ev) {
-    if (!ev) return;
-    const node = CH.events.render(ev);
-    if (node) list.appendChild(node);
-  }
-  function row(dl, k, v) {
-    dl.appendChild(CH.el("dt", { text: k }));
-    dl.appendChild(CH.el("dd", { text: v == null || v === "" ? "—" : String(v) }));
-  }
-  function renderSession(el) {
-    const dl = el.querySelector(".panel-dl");
-    if (!dl) return;
-    CH.clear(dl);
-    const st = (apiRef && apiRef.state) || {};
-    const id = st.identity || {};
-    const h = st.harness || {};
-    row(dl, "State", st.state || "offline");
-    row(dl, "Session", id.sessionId || "not started");
-    row(dl, "Spec", id.specName);
-    row(dl, "Harness", h.present ? h.entry || "present" : "not dropped");
-    if (typeof h.depsInstalled === "boolean")
-      row(dl, "Deps", h.depsInstalled ? "installed" : "missing");
-    row(dl, "Shape", (apiRef && apiRef.config && apiRef.config.shape) || "");
   }
 
   // ── Export ───────────────────────────────────────────────────────────────
