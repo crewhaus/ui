@@ -7,5 +7,5 @@
   "input": "none",
   "icon": "cloud",
   "accent": "#F6821F",
-  "features": ["sse", "graph", "edge"]
+  "features": ["sse", "edge", "files", "settings"]
 }

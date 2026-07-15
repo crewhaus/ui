@@ -7,5 +7,5 @@
   "input": "oneshot",
   "icon": "layers",
   "accent": "#F2A65A",
-  "features": ["roles", "handoffs", "routing"]
+  "features": ["roles", "handoffs", "routing", "focus", "subagents", "files", "settings"]
 }

@@ -7,5 +7,5 @@
   "input": "oneshot",
   "icon": "workflow",
   "accent": "#2BC4B4",
-  "features": ["steps", "orchestration", "run"]
+  "features": ["steps", "run", "artifacts", "files", "settings"]
 }

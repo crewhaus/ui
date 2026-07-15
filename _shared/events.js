@@ -240,6 +240,36 @@
       title: `circuit ${e.fromState} -> ${e.toState}`,
       sub: e.reason || "",
     }),
+    // ── Routing / cache infrastructure (v0.3.0) ──────────────────────────────
+    cache_rotation: (e) => ({
+      icon: "refresh",
+      sev: "muted",
+      title: "prompt cache rotated",
+      meta: Number.isFinite(e.rotatedAt) ? new Date(e.rotatedAt).toLocaleTimeString() : "",
+    }),
+    model_route: (e) => ({
+      icon: "git",
+      sev: "info",
+      name: e.model,
+      title: `route · ${e.policy}`,
+      sub: e.reason || "",
+      badge: e.explored ? "exploring" : e.routeKey || "",
+      meta: e.explored ? e.routeKey || "" : "",
+    }),
+    model_tier_route: (e) => ({
+      icon: "layers",
+      sev: e.escalated ? "warn" : "muted",
+      name: e.model,
+      title: `tier · ${e.tier}`,
+      sub: e.reason || "",
+      badge: e.escalated ? "escalated" : "",
+    }),
+    model_failover: (e) => ({
+      icon: "refresh",
+      sev: "warn",
+      title: `failover ${e.from} -> ${e.to}`,
+      badge: e.reason || "",
+    }),
   };
 
   function pct(a, b) {
@@ -314,7 +344,20 @@
   }
 
   function newStats() {
-    return { turns: 0, tools: 0, errors: 0, costMicros: 0, tokensIn: 0, tokensOut: 0, subAgents: 0 };
+    return {
+      turns: 0,
+      tools: 0,
+      errors: 0,
+      costMicros: 0,
+      tokensIn: 0,
+      tokensOut: 0,
+      cacheTokens: 0,
+      subAgents: 0,
+      // true once a model_response was billed against an unpriced model (the
+      // pricing table missed it); lets the display say "unpriced" instead of a
+      // misleading $0.00.
+      unpriced: false,
+    };
   }
 
   function accrue(ev, s) {
@@ -337,11 +380,28 @@
       case "sub_agent_start":
         s.subAgents++;
         break;
+      // Tokens come from model_response.usage — always present and
+      // pricing-INDEPENDENT, so the token tile survives an unpriced model (a
+      // pricing-table miss suppresses/zeroes the cost of cost_accrual). Cost is
+      // still summed from cost_accrual below. Sourcing tokens here (not from
+      // cost_accrual) also avoids double-counting the same response.
+      case "model_response":
+        if (ev.usage) {
+          s.tokensIn += ev.usage.input || 0;
+          s.tokensOut += ev.usage.output || 0;
+          s.cacheTokens += (ev.usage.cacheRead || 0) + (ev.usage.cacheCreate || 0);
+        }
+        break;
       case "cost_accrual":
+        // Per-response accruals only (not the aggregate summary variant).
         if (!ev.summary) {
           s.costMicros += ev.costUsdMicros || 0;
-          s.tokensIn += ev.inputTokens || 0;
-          s.tokensOut += ev.outputTokens || 0;
+          // Unpriced model: factory sets `unpriced:true` on a pricing miss;
+          // fall back to the robust signal (zero cost but real tokens) for
+          // older runtimes that predate the flag.
+          if (ev.unpriced || (!(ev.costUsdMicros > 0) && (ev.inputTokens || ev.outputTokens))) {
+            s.unpriced = true;
+          }
         }
         break;
     }

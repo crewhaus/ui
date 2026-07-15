@@ -7,5 +7,5 @@
   "input": "oneshot",
   "icon": "database",
   "accent": "#4FB6E0",
-  "features": ["retrieve", "citations", "rag", "index"]
+  "features": ["retrieve", "citations", "rag", "index", "files", "artifacts", "tools", "settings"]
 }

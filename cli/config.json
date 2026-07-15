@@ -7,5 +7,5 @@
   "input": "interactive",
   "icon": "terminal",
   "accent": "#2ecc8b",
-  "features": ["chat", "tools", "subagents", "mcp", "permissions", "cost", "skills"]
+  "features": ["chat", "tools", "subagents", "mcp", "permissions", "cost", "skills", "files", "focus", "plan", "wiki", "settings"]
 }

@@ -57,6 +57,55 @@
   --shadow-lg: 0 24px 70px rgba(0, 0, 0, 0.5);
 }
 
+/* ── Light theme (decision §10.5) ─────────────────────────────────────────
+   An opt-in `[data-theme="light"]` override of the dark tokens above — a
+   light "drafting paper" palette tuned so every component (cards, events,
+   stats, feed, panels) reads well. Dark stays the default (no
+   prefers-color-scheme auto-switch). The accent stays user-chosen: app-kit
+   writes --accent/-2/-ghost/-glow inline on documentElement, so it wins in
+   both themes; text on accent uses a fixed near-black (see .btn.primary). */
+:root[data-theme="light"] {
+  /* paper — page is a soft green-gray, surfaces are near-white and float */
+  --bg: #e7eae4;
+  --bg-2: #edf0ea;
+  --panel: #fbfcf9;
+  --panel-2: #f5f7f2;
+  --panel-3: #edf1ea;
+  --panel-4: #e2e8dd;
+
+  /* ink — dark text on the light paper */
+  --ink: #16221b;
+  --ink-2: #45524b;
+  --ink-3: #6d7b73;
+  --ink-4: #9aa79f;
+
+  /* mint accent ghosts (accent hex itself is set inline by app-kit) */
+  --mint-dim: rgba(30, 150, 100, 0.6);
+  --mint-ghost: rgba(46, 204, 139, 0.16);
+  --mint-glow: rgba(46, 204, 139, 0.24);
+  --accent-ghost: rgba(46, 204, 139, 0.16);
+  --accent-glow: rgba(46, 204, 139, 0.24);
+
+  /* semantic — darkened for contrast on the light surface */
+  --amber: #b7791f;
+  --amber-ghost: rgba(183, 121, 31, 0.14);
+  --red: #d0463f;
+  --red-ghost: rgba(208, 70, 63, 0.12);
+  --blue: #2f7fd6;
+  --blue-ghost: rgba(47, 127, 214, 0.12);
+  --violet: #7c5cd0;
+  --violet-ghost: rgba(124, 92, 208, 0.12);
+
+  /* drafting — rules/grid visible on the light paper */
+  --grid: rgba(60, 90, 75, 0.05);
+  --grid-major: rgba(60, 90, 75, 0.09);
+  --rule: rgba(40, 62, 50, 0.14);
+  --rule-2: rgba(40, 62, 50, 0.24);
+
+  --shadow: 0 1px 2px rgba(30, 50, 40, 0.08), 0 8px 30px rgba(30, 50, 40, 0.12);
+  --shadow-lg: 0 24px 70px rgba(30, 50, 40, 0.2);
+}
+
 * {
   box-sizing: border-box;
 }
@@ -247,8 +296,20 @@ a:hover {
 /* ── Layout primitives ──────────────────────────────────────────────────── */
 
 .app-body {
+  min-width: 0;
   min-height: 0;
+  flex: 1 1 auto;
   display: grid;
+  overflow: hidden;
+}
+
+/* The row that holds `main` + the right-side panel host. With the host
+   display:none (no enabled views), `main` alone fills it — identical to when
+   `.app-body` was a lone grid cell. */
+.app-main-row {
+  position: relative;
+  min-height: 0;
+  display: flex;
   overflow: hidden;
 }
 .split {
@@ -326,6 +387,217 @@ a:hover {
 }
 .pane-scroll.flush {
   padding: 0;
+}
+
+/* ── Panel system (CH.panels) ───────────────────────────────────────────── */
+/* A slim icon rail + a collapsible content pane docked at the right edge.
+   Hidden entirely until a shape enables ≥1 view (features[] gating), so a
+   shape with no views is visually unchanged. */
+.panel-host {
+  display: none;
+  flex: 0 0 auto;
+  min-height: 0;
+}
+.panel-host.has-views {
+  display: flex;
+}
+
+.panel-rail {
+  flex: 0 0 auto;
+  width: 48px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 0;
+  border-left: 1px solid var(--rule);
+  background: linear-gradient(180deg, var(--panel-2), var(--panel));
+  z-index: 6;
+}
+.panel-rail-btn {
+  position: relative;
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--ink-2);
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+.panel-rail-btn:hover {
+  background: var(--panel-3);
+  color: var(--ink);
+}
+.panel-rail-btn.active {
+  background: var(--accent-ghost);
+  border-color: var(--accent-glow);
+  color: var(--accent);
+}
+.panel-rail-btn svg {
+  width: 17px;
+  height: 17px;
+}
+.panel-rail-badge {
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 4px;
+  border-radius: 100px;
+  background: var(--accent);
+  color: #04130c;
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 15px;
+  text-align: center;
+}
+
+.panel-pane {
+  flex: 0 0 auto;
+  width: 0;
+  overflow: hidden;
+  display: flex;
+  background: var(--panel);
+  transition: width 0.18s ease;
+}
+.panel-host.open .panel-pane {
+  width: 380px;
+  border-left: 1px solid var(--rule);
+}
+.panel-pane-inner {
+  width: 380px;
+  min-width: 380px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.panel-pane-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 14px 9px 16px;
+  border-bottom: 1px solid var(--rule);
+  background: var(--panel);
+  flex: 0 0 auto;
+}
+.panel-pane-title {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink);
+}
+.panel-pane-head .grow {
+  flex: 1;
+}
+.panel-pane-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 14px 16px;
+}
+.panel-backdrop {
+  display: none;
+}
+
+/* view-content helpers used by the built-in demo views */
+.panel-view {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.panel-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.panel-hint {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+.panel-empty {
+  color: var(--ink-3);
+  font-size: 13px;
+  padding: 8px 0;
+}
+.panel-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.panel-dl {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 6px 14px;
+  margin: 0;
+  font-size: 13px;
+}
+.panel-dl dt {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  align-self: center;
+}
+.panel-dl dd {
+  margin: 0;
+  color: var(--ink);
+  word-break: break-word;
+}
+
+/* chat-link routing: references become inline links into a panel view */
+.ch-link {
+  color: var(--accent);
+  cursor: pointer;
+  border-bottom: 1px dotted var(--accent-glow);
+  text-decoration: none;
+}
+.ch-link:hover {
+  border-bottom-style: solid;
+  text-decoration: none;
+}
+
+/* Narrow: the pane slides over the main content instead of squeezing it
+   (matches the .split collapse breakpoint). The rail stays docked. */
+@media (max-width: 900px) {
+  .panel-pane {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    right: 48px;
+    width: min(340px, 82vw);
+    transform: translateX(calc(100% + 48px));
+    transition: transform 0.18s ease;
+    box-shadow: var(--shadow-lg);
+    z-index: 7;
+  }
+  .panel-host.open .panel-pane {
+    width: min(340px, 82vw);
+    transform: translateX(0);
+  }
+  .panel-pane-inner {
+    width: 100%;
+    min-width: 0;
+  }
+  .panel-host.open .panel-backdrop {
+    display: block;
+    position: absolute;
+    top: 0;
+    right: 48px;
+    bottom: 0;
+    left: 0;
+    background: rgba(0, 0, 0, 0.42);
+    z-index: 6;
+  }
 }
 
 /* ── Buttons & inputs ───────────────────────────────────────────────────── */
@@ -435,6 +707,66 @@ a:hover {
   font-family: var(--mono);
   display: flex;
   gap: 12px;
+}
+
+/* ── Composer attach control (local file upload) ────────────────────────── */
+.composer.dragging {
+  outline: 2px dashed var(--accent);
+  outline-offset: -4px;
+  background: var(--accent-ghost);
+}
+.composer-attach {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.composer-attach:empty {
+  display: none;
+  margin-top: 0;
+}
+.attach-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ink-2);
+  background: var(--panel-3);
+  border: 1px solid var(--rule-2);
+  border-radius: var(--radius-sm);
+  padding: 3px 8px;
+}
+.attach-chip svg {
+  width: 12px;
+  height: 12px;
+  opacity: 0.7;
+  flex: 0 0 auto;
+}
+.attach-chip .an {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.attach-chip .as {
+  color: var(--ink-3);
+}
+.attach-chip.ok {
+  border-color: var(--accent);
+  color: var(--ink);
+}
+.attach-chip.ok svg {
+  color: var(--accent);
+  opacity: 1;
+}
+.attach-chip.err {
+  border-color: var(--red);
+  color: var(--red);
+}
+.attach-chip.err svg {
+  color: var(--red);
+  opacity: 1;
 }
 kbd {
   font-family: var(--mono);

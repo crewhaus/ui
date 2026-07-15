@@ -7,5 +7,5 @@
   "input": "oneshot",
   "icon": "search",
   "accent": "#C792EA",
-  "features": ["branches", "citations", "report", "sources"]
+  "features": ["branches", "citations", "report", "sources", "context", "settings"]
 }

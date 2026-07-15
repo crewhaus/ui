@@ -94,6 +94,8 @@
     gamepad:
       '<line x1="6" x2="10" y1="11" y2="11"/><line x1="8" x2="8" y1="9" y2="13"/><line x1="15" x2="15.01" y1="12" y2="12"/><line x1="18" x2="18.01" y1="10" y2="10"/><rect width="20" height="12" x="2" y="6" rx="2"/>',
     link: '<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>',
+    paperclip:
+      '<path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/>',
     workflow:
       '<rect width="8" height="8" x="3" y="3" rx="2"/><path d="M7 11v4a2 2 0 0 0 2 2h4"/><rect width="8" height="8" x="13" y="13" rx="2"/>',
     cloud: '<path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/>',
@@ -122,6 +124,11 @@
     thumbsDown:
       '<path d="M17 14V2"/><path d="M9 18.12 10 14H4.17a2 2 0 0 1-1.92-2.56l2.33-8A2 2 0 0 1 6.5 2H20a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2.76a2 2 0 0 0-1.79 1.11L12 22a3.13 3.13 0 0 1-3-3.88Z"/>',
     star: '<polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>',
+    panelRight:
+      '<rect width="18" height="18" x="3" y="3" rx="2"/><path d="M15 3v18"/>',
+    sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/>',
+    moon: '<path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>',
+    list: '<path d="M3 12h.01M3 18h.01M3 6h.01M8 12h13M8 18h13M8 6h13"/>',
   };
   const _iconCache = {};
   function iconTemplate(name) {
@@ -286,6 +293,12 @@
   function mdInto(node, src) {
     clear(node);
     node.appendChild(md(src));
+    // Chat-link routing: after safe markdown is in the DOM, let the panel
+    // system turn referenced files / plan ids / wiki slugs into real anchor
+    // nodes wired to CH.panels.open(...). No-op until panels.js registers
+    // matchers; still innerHTML-free (it only rewrites text nodes).
+    const panels = window.CH.panels;
+    if (panels && typeof panels._applyLinks === "function") panels._applyLinks(node);
     return node;
   }
 
@@ -592,6 +605,12 @@
   }
 
   // ── Composer ──────────────────────────────────────────────────────────────
+  // opts.attach — a CH.Connection (has .send/.on) turns on a LOCAL file attach
+  //   control: a paperclip button + drag-drop onto the composer. Chosen/dropped
+  //   files are read in the browser (FileReader) and written to a local path by
+  //   the host (default harness `uploads/`); the returned path is inserted into
+  //   the message so the agent can be told to read it. Files never leave the box.
+  // opts.attachDir — optional destination override passed straight to the host.
   function Composer(mount, onSubmit, opts) {
     opts = opts || {};
     const ta = el("textarea", {
@@ -622,14 +641,149 @@
       }
     });
     btn.addEventListener("click", fire);
+
+    const composerEl = el("div", { class: "composer" });
+    const row = el("div", { class: "composer-row" });
+
+    const attachOn = opts.attach && typeof opts.attach.send === "function";
+    let attachRow = null;
+    if (attachOn) {
+      const conn = opts.attach;
+      const dir = typeof opts.attachDir === "string" ? opts.attachDir : undefined;
+      const ns = "att_" + Math.random().toString(36).slice(2, 9);
+      let seq = 0;
+      const pending = new Map(); // id -> chip node (this composer instance only)
+
+      attachRow = el("div", { class: "composer-attach" });
+      const fileInput = el("input", { type: "file", multiple: true, style: { display: "none" } });
+      const attachBtn = el(
+        "button",
+        {
+          class: "btn ghost icon-only",
+          type: "button",
+          title: "Attach a local file — saved on this machine for the agent to read",
+          onClick: () => fileInput.click(),
+        },
+        icon("paperclip", 15),
+      );
+
+      const chip = (id, name) =>
+        el("div", { class: "attach-chip pending", dataset: { id } }, [
+          icon("file", 12),
+          el("span", { class: "an", text: name }),
+          el("span", { class: "as" }),
+        ]);
+      const setChip = (id, state, text) => {
+        const node = pending.get(id);
+        if (!node) return;
+        node.className = "attach-chip " + state;
+        const s = node.querySelector(".as");
+        if (s) s.textContent = text || "";
+        if (state !== "pending") {
+          setTimeout(() => {
+            node.style.transition = "opacity .3s";
+            node.style.opacity = "0";
+            setTimeout(() => node.remove(), 300);
+          }, state === "err" ? 4200 : 2600);
+        }
+      };
+
+      const insertPath = (relPath) => {
+        if (!relPath) return;
+        const cur = ta.value;
+        if (!cur.trim()) ta.value = "Read " + relPath;
+        else ta.value = /\s$/.test(cur) ? cur + relPath : cur + " " + relPath;
+        autosize();
+        ta.focus();
+      };
+
+      const sendFile = (file) => {
+        if (!file) return;
+        const id = ns + "_" + seq++;
+        const node = chip(id, file.name);
+        pending.set(id, node);
+        attachRow.appendChild(node);
+        setChip(id, "pending", "reading…");
+        const reader = new FileReader();
+        reader.onerror = () => setChip(id, "err", "read failed");
+        reader.onload = () => {
+          const res = String(reader.result || "");
+          const comma = res.indexOf(",");
+          const contentBase64 = comma >= 0 ? res.slice(comma + 1) : "";
+          if (!contentBase64) {
+            setChip(id, "err", "empty");
+            return;
+          }
+          setChip(id, "pending", "saving…");
+          conn.send({ type: "attach", id, name: file.name, contentBase64, dir });
+        };
+        reader.readAsDataURL(file);
+      };
+      const takeFiles = (list) => {
+        if (!list) return;
+        Array.prototype.forEach.call(list, sendFile);
+      };
+
+      fileInput.addEventListener("change", () => {
+        takeFiles(fileInput.files);
+        fileInput.value = ""; // allow re-selecting the same file
+      });
+
+      // Result handler: results for another composer instance's namespace find
+      // no pending chip here and no-op, so stale handlers after a rebuild are safe.
+      if (typeof conn.on === "function") {
+        conn.on("attach_result", (m) => {
+          if (!m || typeof m.id !== "string" || !pending.has(m.id)) return;
+          if (m.ok) {
+            setChip(m.id, "ok", "saved locally");
+            insertPath(m.relPath || m.path || "");
+            toast("Saved " + (m.relPath || m.name) + " — stays on this machine");
+          } else {
+            setChip(m.id, "err", m.error || "failed");
+            toast(m.error || "Attach failed", "err");
+          }
+          pending.delete(m.id);
+        });
+      }
+
+      // Drag-and-drop onto the whole composer.
+      const stop = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+      };
+      let depth = 0;
+      composerEl.addEventListener("dragenter", (e) => {
+        stop(e);
+        depth++;
+        composerEl.classList.add("dragging");
+      });
+      composerEl.addEventListener("dragover", stop);
+      composerEl.addEventListener("dragleave", (e) => {
+        stop(e);
+        if (--depth <= 0) {
+          depth = 0;
+          composerEl.classList.remove("dragging");
+        }
+      });
+      composerEl.addEventListener("drop", (e) => {
+        stop(e);
+        depth = 0;
+        composerEl.classList.remove("dragging");
+        if (e.dataTransfer && e.dataTransfer.files) takeFiles(e.dataTransfer.files);
+      });
+
+      add(row, [attachBtn, fileInput]);
+    }
+
+    add(row, [ta, btn]);
     const hint = el("div", { class: "composer-hint" }, [
       el("span", null, [kbd("Enter"), " send"]),
       el("span", null, [kbd("Shift"), "+", kbd("Enter"), " newline"]),
+      attachOn ? el("span", { class: "muted", text: "Attachments stay on this machine" }) : null,
       opts.hint ? el("span", { class: "muted", text: opts.hint }) : null,
     ]);
-    mount.appendChild(
-      el("div", { class: "composer" }, [el("div", { class: "composer-row" }, [ta, btn]), hint]),
-    );
+    add(composerEl, [row, attachRow, hint]);
+    mount.appendChild(composerEl);
     return {
       focus: () => ta.focus(),
       setEnabled: (b) => {

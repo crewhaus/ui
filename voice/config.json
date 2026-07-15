@@ -7,5 +7,5 @@
   "input": "interactive",
   "icon": "mic",
   "accent": "#FF6FB5",
-  "features": ["transcript", "turns", "voice"]
+  "features": ["transcript", "turns", "voice", "tools", "subagents", "settings"]
 }
