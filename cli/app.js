@@ -216,6 +216,7 @@
         });
         composer = Composer(leftFoot, (txt) => api.sendInput(txt), {
           placeholder: "Message the agent…",
+          attach: api.conn, // local file attach (paperclip + drag-drop)
         });
         composer.setEnabled(api.isRunning());
 

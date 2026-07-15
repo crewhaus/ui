@@ -708,6 +708,66 @@ a:hover {
   display: flex;
   gap: 12px;
 }
+
+/* ── Composer attach control (local file upload) ────────────────────────── */
+.composer.dragging {
+  outline: 2px dashed var(--accent);
+  outline-offset: -4px;
+  background: var(--accent-ghost);
+}
+.composer-attach {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.composer-attach:empty {
+  display: none;
+  margin-top: 0;
+}
+.attach-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ink-2);
+  background: var(--panel-3);
+  border: 1px solid var(--rule-2);
+  border-radius: var(--radius-sm);
+  padding: 3px 8px;
+}
+.attach-chip svg {
+  width: 12px;
+  height: 12px;
+  opacity: 0.7;
+  flex: 0 0 auto;
+}
+.attach-chip .an {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.attach-chip .as {
+  color: var(--ink-3);
+}
+.attach-chip.ok {
+  border-color: var(--accent);
+  color: var(--ink);
+}
+.attach-chip.ok svg {
+  color: var(--accent);
+  opacity: 1;
+}
+.attach-chip.err {
+  border-color: var(--red);
+  color: var(--red);
+}
+.attach-chip.err svg {
+  color: var(--red);
+  opacity: 1;
+}
 kbd {
   font-family: var(--mono);
   font-size: 10px;

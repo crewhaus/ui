@@ -788,6 +788,99 @@ async function installSpecTooling(harnessDir: string, log: (l: string) => void):
   await proc.exited;
 }
 
+// -- File upload (attach) -----------------------------------------------------
+//
+// The composer's attach control (paperclip + drag-drop) reads a file IN THE
+// BROWSER and sends it here as base64. The host writes it to a LOCAL path the
+// agent can read — default `<harnessRoot>/uploads/`, or a user-chosen dir — and
+// returns the written path so the user can reference it in the next message
+// ("Read ./uploads/data.csv"). This is a plain local write on the user's own
+// machine: NOTHING is uploaded off the box, there is no shared/central store.
+// It is traversal-guarded on BOTH the destination dir AND the filename,
+// size-capped, written non-executable (0600), and the bytes are NEVER run.
+// The helpers are pure/exported so they unit-test without a running server.
+
+/** Hard cap on a single uploaded file (decoded bytes). Larger files should be
+ *  referenced by path directly rather than round-tripped through the browser. */
+export const UPLOAD_MAX_BYTES = 25 * 1024 * 1024; // 25 MiB
+
+/** Default upload destination, relative to the harness root. */
+export const UPLOAD_DEFAULT_DIR = "uploads";
+
+/**
+ * Reduce an arbitrary client-supplied filename to a SAFE basename: strip any
+ * directory component (so `../../etc/passwd` → `passwd`), drop control chars +
+ * NUL, forbid the reserved `.`/`..` names, and bound the length (preserving a
+ * short extension). Returns null when nothing safe remains. Pure.
+ */
+export function sanitizeUploadName(name: string): string | null {
+  if (typeof name !== "string") return null;
+  // Basename only: everything after the last slash/backslash.
+  let base = name.split(/[\\/]+/).pop() ?? "";
+  base = base.replace(/[\x00-\x1f\x7f]/g, "").trim(); // strip NUL + control chars
+  if (base === "" || base === "." || base === "..") return null;
+  if (base.length > 200) {
+    const dot = base.lastIndexOf(".");
+    const ext = dot > 0 && base.length - dot <= 12 ? base.slice(dot) : "";
+    base = base.slice(0, 200 - ext.length) + ext;
+  }
+  return base;
+}
+
+/**
+ * Resolve the destination DIRECTORY for an upload, mirroring {@link
+ * resolveEnvPath}: default (no `dir`) is `<harnessRoot>/uploads`; an explicit
+ * ABSOLUTE path is honoured as user-owned (uploads may land anywhere the user
+ * names on their own machine); a RELATIVE path is resolved under `harnessRoot`
+ * and MUST stay inside it (no `..` traversal). Returns null when denied.
+ */
+export function resolveUploadDir(harnessRoot: string, dir?: string | null): string | null {
+  const root = resolve(harnessRoot);
+  if (dir == null || dir === "") return join(root, UPLOAD_DEFAULT_DIR);
+  if (typeof dir !== "string" || dir.includes("\0")) return null;
+  if (isAbsolute(dir)) return resolve(dir);
+  const full = resolve(root, dir);
+  if (full !== root && !full.startsWith(root + sep)) return null;
+  return full;
+}
+
+/** Cheap sanity check on a base64 payload BEFORE we allocate a decode buffer:
+ *  non-empty, base64 charset only, and small enough that `len*3/4` stays within
+ *  `maxBytes`. Guards against decoding a pathologically large or garbage body. */
+export function isPlausibleBase64(s: string, maxBytes: number): boolean {
+  if (typeof s !== "string") return false;
+  const body = s.replace(/\s+/g, "");
+  if (body.length === 0) return false;
+  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(body)) return false;
+  if (Math.floor(body.length / 4) * 3 > maxBytes + 3) return false; // pre-decode size bound
+  return true;
+}
+
+/** Display path for a written upload: `./uploads/x` when it lives inside the
+ *  harness root (so the agent reads it with a relative path), else the absolute
+ *  path (the user pointed the upload outside the repo). */
+export function uploadDisplayPath(harnessRoot: string, full: string): string {
+  const root = resolve(harnessRoot);
+  if (full === root) return ".";
+  if (full.startsWith(root + sep)) return "./" + full.slice(root.length + 1).split(sep).join("/");
+  return full;
+}
+
+/** Non-clobbering path in `dir` for `name`: if `name` exists, insert ` (2)`,
+ *  ` (3)`, … before the extension. Never overwrites existing user data. */
+export function uniqueUploadPath(dir: string, name: string): string {
+  const first = join(dir, name);
+  if (!existsSync(first)) return first;
+  const dot = name.lastIndexOf(".");
+  const stem = dot > 0 ? name.slice(0, dot) : name;
+  const ext = dot > 0 ? name.slice(dot) : "";
+  for (let i = 2; i < 1000; i++) {
+    const cand = join(dir, `${stem} (${i})${ext}`);
+    if (!existsSync(cand)) return cand;
+  }
+  return join(dir, `${stem}-${Date.now()}${ext}`);
+}
+
 // -- Process supervisor -------------------------------------------------------
 
 type ClientMsg =
@@ -817,7 +910,13 @@ type ClientMsg =
   // when a `specPath` is given, ensure the spec's `$KEY` ref at that path.
   | { type: "spec_get" }
   | { type: "spec_patch"; changes: SpecChange[]; target?: string }
-  | { type: "secret_set"; key: string; value: string; path?: string; specPath?: string[] };
+  | { type: "secret_set"; key: string; value: string; path?: string; specPath?: string[] }
+  // File upload / attach (user-directed, LOCAL). The composer reads a file in
+  // the browser and sends its bytes as base64; the host writes it to a local
+  // path the agent can read (default `<harnessRoot>/uploads/`, or `dir`) and
+  // replies with `{type:"attach_result", …, relPath}`. `id` correlates the
+  // reply to the composer chip. Nothing leaves the machine.
+  | { type: "attach"; name: string; contentBase64: string; dir?: string; id?: string };
 
 type Broadcast = (msg: unknown) => void;
 
@@ -949,6 +1048,9 @@ export class Supervisor {
       case "secret_set":
         await this.handleSecretSet(msg);
         break;
+      case "attach":
+        this.handleAttach(msg);
+        break;
     }
   }
 
@@ -1026,6 +1128,58 @@ export class Supervisor {
     } catch (err) {
       this.log(`Failed to record feedback: ${(err as Error).message}`);
     }
+  }
+
+  /**
+   * Write a user-attached file to a LOCAL path the agent can read (the attach
+   * control in the composer). Default destination `<harnessRoot>/uploads/`, or a
+   * user-chosen `dir`; traversal-guarded on BOTH the dir and the filename,
+   * size-capped, written 0600 and NEVER executed. Broadcasts `attach_result`
+   * with the written path (relative when inside the harness) so the browser can
+   * reference it in the next message. The file stays on this machine — there is
+   * no network destination and nothing is shared.
+   */
+  private handleAttach(msg: Extract<ClientMsg, { type: "attach" }>): void {
+    const id = typeof msg.id === "string" ? msg.id : undefined;
+    const fail = (error: string) =>
+      this.broadcast({ type: "attach_result", ok: false, ...(id ? { id } : {}), error });
+
+    const safeName = sanitizeUploadName(String(msg.name ?? ""));
+    if (!safeName) return fail("Invalid file name.");
+
+    const harnessRoot = findHarnessRoot(this.harnessDir);
+    const dir = resolveUploadDir(harnessRoot, typeof msg.dir === "string" ? msg.dir : null);
+    if (!dir) return fail("Denied upload directory (traversal outside the harness).");
+
+    const cap = Math.floor(UPLOAD_MAX_BYTES / (1024 * 1024));
+    const b64 = typeof msg.contentBase64 === "string" ? msg.contentBase64 : "";
+    if (!isPlausibleBase64(b64, UPLOAD_MAX_BYTES))
+      return fail(`File is empty, malformed, or exceeds the ${cap} MB limit.`);
+
+    const bytes = Buffer.from(b64.replace(/\s+/g, ""), "base64");
+    if (bytes.byteLength === 0) return fail("File is empty.");
+    if (bytes.byteLength > UPLOAD_MAX_BYTES) return fail(`File exceeds the ${cap} MB limit.`);
+
+    let full: string;
+    try {
+      mkdirSync(dir, { recursive: true });
+      full = uniqueUploadPath(dir, safeName);
+      writeFileSync(full, bytes, { mode: 0o600 });
+      chmodSync(full, 0o600); // non-executable even if the file somehow pre-existed
+    } catch (e) {
+      return fail(`Could not write the file: ${(e as Error).message}`);
+    }
+    const relPath = uploadDisplayPath(harnessRoot, full);
+    this.log(`Saved attachment ${relPath} (${bytes.byteLength} bytes, local).`);
+    this.broadcast({
+      type: "attach_result",
+      ok: true,
+      ...(id ? { id } : {}),
+      name: safeName,
+      path: full,
+      relPath,
+      bytes: bytes.byteLength,
+    });
   }
 
   // ── Settings: spec read / patch / secret (Phase 4) ───────────────────────
