@@ -7,5 +7,5 @@
   "input": "none",
   "icon": "gamepad",
   "accent": "#FF8A5B",
-  "features": ["game", "loop", "state", "actions"]
+  "features": ["game", "state", "actions", "settings", "tools", "plan", "files"]
 }

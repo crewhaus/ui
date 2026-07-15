@@ -20,6 +20,19 @@
   const { el, icon, mdInto, clear, dropzone, stripAnsi, events, fmtBytes, fmtMs, fmtUsd, fmtTokens, copy } = window.CH;
 
   // Research milestone kinds carried on stdout (no runId -> not TraceEvents).
+  //
+  // Phase-5 migration note (Part B): the branch plan (plan_done -> subQuestions,
+  // branch_start/branch_end) is reconstructed from these emitter-specific stdout
+  // JSON lines. The 0.3.0 memory release exposes a structured analog — the
+  // continuity `plan_update` file surfaced by the host memory bridge as
+  // `{type:"memory",surface:"plan"}` and rendered by the shared `plan` view (now
+  // enabled via this shape's features[] "branches", using CH.views.parsePlan()).
+  // We keep the stdout parser: it is the emitter's own verified protocol, and
+  // whether the research harness writes plan_update steps 1:1 with these branches
+  // cannot be confirmed without a live 0.3.0 research harness (local factory is
+  // still v0.2.4). So the real-signal path ships as the complementary right-rail
+  // plan view and this parser remains authoritative for the branch hero until the
+  // equivalence is verifiable.
   const RESEARCH_KINDS = new Set([
     "run_start", "resume", "plan_start", "plan_done", "plan_loaded",
     "sources_resolved", "branch_start", "branch_end", "budget_exceeded", "run_done",

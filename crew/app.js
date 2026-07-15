@@ -172,6 +172,13 @@
       }
 
       // ── Event ingestion ─────────────────────────────────────────────────
+      // Phase-5 note (Part B): the roster/handoff hero is already reconstructed
+      // from REAL trace events (role_start/role_end/handoff/crew_done, admitted
+      // by the host's runId-less crew-event widening) — there is no brittle
+      // stdout regex to retire here. The 0.3.0 plan/focus panel views (enabled
+      // via this shape's features[] "roles"/"focus") complement it, reading the
+      // continuity `.crewhaus/` files via the memory bridge; the hero stays as
+      // the live at-a-glance surface and the views add the durable ledger.
       function handleCrewEvent(ev) {
         switch (ev.kind) {
           case "role_start": {

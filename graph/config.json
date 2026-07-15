@@ -7,5 +7,5 @@
   "input": "oneshot",
   "icon": "git",
   "accent": "#B08CFF",
-  "features": ["nodes", "state", "edges", "run", "context"]
+  "features": ["nodes", "state", "edges", "run", "context", "files", "artifacts", "settings"]
 }

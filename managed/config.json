@@ -8,5 +8,5 @@
   "port": 3000,
   "icon": "cloud",
   "accent": "#8FA3FF",
-  "features": ["tenants", "gateway", "requests", "health"]
+  "features": ["tenants", "gateway", "requests", "health", "runs", "settings", "tools", "files"]
 }

@@ -14,6 +14,20 @@
 
   // Matches the per-step banner the workflow emitter writes to stdout:
   //   "[step 2/4: draft outline]"
+  //
+  // Phase-5 migration note (Part B): this brittle text marker is the ONLY source
+  // of step state for the hero timeline. The 0.3.0 memory release adds a
+  // structured equivalent — `plan_update` writes `.crewhaus/state/<spec>/
+  // plan-*.md`, which the host's memory bridge surfaces as
+  // `{type:"memory",surface:"plan"}` and the shared `plan` view (now enabled via
+  // this shape's features[] "steps") renders through the unit-tested
+  // CH.views.parsePlan(). It is DELIBERATELY left in place here: swapping the
+  // hero off `[step N/M]` requires confirming the workflow harness actually
+  // emits plan_update steps 1:1 with these banners, which cannot be verified
+  // without a live 0.3.0 workflow harness (the local factory is still v0.2.4).
+  // Ripping it out on an unverified assumption would break a working hero, so
+  // the real-signal path ships as the complementary right-rail plan view and
+  // this parser stays until the emission is confirmed equivalent.
   const STEP_RE = /\[step\s+(\d+)\/(\d+):\s*([^\]]*)\]/;
 
   function paneHead(ic, label, right) {
