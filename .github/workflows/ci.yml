@@ -1,0 +1,130 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# `github.ref` is distinct per PR (refs/pull/N/merge) and per branch, so it
+# groups correctly without interpolating any attacker-controllable field.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# NOTE: no step below interpolates a `github.event.*` value into a `run:`
+# script. Keep it that way — every run: block here uses only literals and
+# shell-local variables.
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: ">=1.2.0"
+
+      # The package declares no dependencies and the suite imports only the
+      # repo's own modules plus node builtins, so there is nothing to install.
+      - name: Test
+        run: bun run test
+
+  # The package ships SOURCE (no build step), so what `files` selects IS the
+  # product. Two @crewhaus packages have shipped broken because that array
+  # silently omitted a directory — the code worked from a source checkout and
+  # CI never looked at a tarball. This job looks at the tarball.
+  pack:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: ">=1.2.0"
+
+      - name: Pack and assert the tarball is complete
+        run: |
+          set -euo pipefail
+          npm pack --pack-destination /tmp >/dev/null 2>&1
+          tar tzf /tmp/crewhaus-ui-*.tgz | sed 's|^package/||' | sort > /tmp/shipped.txt
+
+          missing=0
+          need() {
+            if ! grep -qxF "$1" /tmp/shipped.txt; then
+              echo "::error::$1 is in the repo but NOT in the published tarball"
+              missing=1
+            fi
+          }
+
+          # The host serves these to the browser at runtime; a missing one is a
+          # blank or broken UI for every shape.
+          for f in _shared/*.js _shared/*.css _shared/host.ts; do need "$f"; done
+
+          # Every shape dir must ship all three of its assets.
+          for d in */config.json; do
+            shape="${d%/config.json}"
+            for f in config.json index.html app.js; do need "$shape/$f"; done
+          done
+
+          # Entry points.
+          for f in bin/cli.ts src/index.ts src/scaffold.ts package.json README.md LICENSE; do
+            need "$f"
+          done
+
+          test "$missing" -eq 0 || { echo "tarball is incomplete — fix package.json \"files\""; exit 1; }
+          echo "tarball complete: $(wc -l < /tmp/shipped.txt) files"
+
+  # A user's very first contact with the package is `bunx @crewhaus/ui` in a
+  # directory holding a compiled harness. Prove that path works against the
+  # TARBALL — installed the way a user gets it, not resolved from the checkout.
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: ">=1.2.0"
+
+      - name: Serve a harness from the packed tarball
+        run: |
+          set -euo pipefail
+          npm pack --pack-destination /tmp >/dev/null 2>&1
+          tgz=$(ls /tmp/crewhaus-ui-*.tgz)
+
+          # A minimal graph harness: a compile-only shape, which is exactly the
+          # class that used to pick a launch mode that exits 1.
+          mkdir -p /tmp/smoke && cd /tmp/smoke
+          cat > crewhaus.yaml <<'YAML'
+          name: smoke-graph
+          target: graph
+          agent:
+            model: claude-sonnet-5
+            instructions: smoke
+          nodes:
+            - name: only
+              prompt: hi
+          YAML
+          mkdir -p dist && echo 'console.log("smoke")' > dist/agent.ts
+
+          bun add "$tgz" >/dev/null 2>&1
+          CREWHAUS_UI_PORT=4199 bun node_modules/@crewhaus/ui/bin/cli.ts serve --dir /tmp/smoke \
+            > /tmp/smoke.log 2>&1 &
+          for _ in $(seq 1 30); do
+            if curl -fsS -o /dev/null http://127.0.0.1:4199/; then ok=1; break; fi
+            sleep 1
+          done
+          test "${ok:-0}" = 1 || { echo "UI never came up"; cat /tmp/smoke.log; exit 1; }
+
+          # The page and the shared assets the page loads must all be served.
+          for path in / /_shared/ui.css /_shared/ui.js /_shared/events.js /_shared/panels.js \
+                      /_shared/views.js /_shared/app-kit.js /_shared/failure.js /app.js; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:4199$path")
+            test "$code" = 200 || { echo "::error::$path returned $code"; exit 1; }
+          done
+
+          # It must have detected the shape from the spec's target:.
+          grep -q "Graph" /tmp/smoke.log || { echo "shape detection failed"; cat /tmp/smoke.log; exit 1; }
+          echo "smoke ok"

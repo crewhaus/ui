@@ -678,22 +678,85 @@ export function launchPreference(
   return raw === "compiled" || raw === "interpreter" ? raw : "auto";
 }
 
-export type LaunchPlan = { mode: "interpreter" | "compiled"; argv: string[] };
+export type LaunchPlan = {
+  mode: "interpreter" | "compiled";
+  argv: string[];
+  /** Set when an explicit interpreter preference could not be honoured. The
+   *  plan is still valid (compiled); the caller logs this to the run log. */
+  warning?: string;
+};
+
+/**
+ * The shapes `crewhaus run` can actually execute. This is a factory-side fact,
+ * not a UI policy: `runRun` dispatches on the spec target and does
+ *   `die("crewhaus run supports target: cli or browser …")`
+ * for anything else — every other target is COMPILE-ONLY. So the interpreter
+ * launch (Path B) is offered for these two shapes and no others; on a graph /
+ * workflow / crew / pipeline / research / batch / voice / eval / onchain /
+ * onchain-game harness it would exit 1 where `bun <entry>` works fine.
+ */
+export const INTERPRETER_SHAPES: readonly string[] = ["cli", "browser"];
+
+/**
+ * The interpreter shapes that also accept `--resume`. `browser` does NOT:
+ * `runRunBrowser` refuses it up front —
+ *   `die("--resume and --continue are not supported for target: browser (single-turn)")`
+ * — so passing the flag turns a working restart into an exit 1. Being
+ * *runnable* by `crewhaus run` and being *resumable* are two different
+ * capabilities and are gated separately.
+ */
+export const RESUMABLE_SHAPES: readonly string[] = ["cli"];
+
+/** Whether the interpreter launch (Path B) is even applicable to this shape:
+ *  it must be a stdio run class (daemon-http/cf-worker/plugin keep their own
+ *  entry) AND a shape `crewhaus run` executes. Pure → unit-testable. */
+export function canInterpretShape(
+  shape: string | null | undefined,
+  runClass: string | null | undefined,
+): boolean {
+  if (runClass !== "stdio-interactive" && runClass !== "stdio-oneshot") return false;
+  return typeof shape === "string" && INTERPRETER_SHAPES.includes(shape);
+}
+
+/** Whether `crewhaus run` will accept `--resume` for this shape. Implies
+ *  {@link canInterpretShape} — a shape we never launch via the interpreter has
+ *  no interpreter resume to offer. Pure → unit-testable. */
+export function canResumeShape(
+  shape: string | null | undefined,
+  runClass: string | null | undefined,
+): boolean {
+  if (!canInterpretShape(shape, runClass)) return false;
+  return typeof shape === "string" && RESUMABLE_SHAPES.includes(shape);
+}
 
 /**
  * Choose how to spawn the harness (decision §10.1 — BOTH modes):
- *   • Path B (interpreter) when a spec is present AND a runnable `crewhaus` CLI
- *     exists: `crewhaus run <spec> [--resume <sessionId>]`, passed as an argv
- *     ARRAY (never one interpolated string). The interpreter re-reads the spec
- *     each start (free recompile) and resumes natively — the live-edit default.
+ *   • Path B (interpreter) when the SHAPE is one `crewhaus run` executes AND a
+ *     spec is present AND a runnable `crewhaus` CLI exists:
+ *     `crewhaus run <spec> [--resume <sessionId>]`, passed as an argv ARRAY
+ *     (never one interpolated string). The interpreter re-reads the spec each
+ *     start (free recompile) — the live-edit default — and, on a shape that
+ *     accepts the flag, resumes natively.
  *   • Path A (compiled) otherwise: `bun <entry>`. The compiled bundle cannot
  *     resume (needs factory F3), so `--resume` is never added here.
- * `prefer` ("compiled"/"interpreter") overrides the auto choice; interpreter is
- * only honoured when it is actually available (spec + CLI), else it falls back
- * to compiled. The `--resume <sessionId>` is threaded in only for a valid
- * latched session id. Pure → unit-testable.
+ *
+ * `prefer` ("compiled"/"interpreter") overrides the auto choice, but only
+ * within what is actually available. An explicit `interpreter` on a
+ * compile-only shape is IGNORED WITH A WARNING rather than refused: the
+ * compiled path is a working launch, so failing the whole start over a
+ * preference would be strictly worse than starting and saying why. (Same
+ * treatment interpreter already gets when the spec or CLI is missing.)
+ *
+ * The `--resume <sessionId>` is threaded in only for a valid latched session id
+ * AND a shape `crewhaus run` will accept it for (see {@link canResumeShape} —
+ * `browser` is runnable but single-turn and dies on the flag).
+ * Pure → unit-testable.
  */
 export function selectLaunch(opts: {
+  /** `config.shape` — the gate on whether `crewhaus run` can run this at all. */
+  shape: string | null;
+  /** `config.runClass` — stdio classes only; others keep their compiled entry. */
+  runClass: string | null;
   specPath: string | null;
   crewhausBin: string | null;
   entryPath: string | null;
@@ -702,16 +765,34 @@ export function selectLaunch(opts: {
   prefer?: "auto" | "compiled" | "interpreter";
 }): LaunchPlan {
   const prefer = opts.prefer ?? "auto";
-  const canInterpret = !!(opts.specPath && opts.crewhausBin);
-  const useInterpreter = prefer === "compiled" ? false : canInterpret;
-  if (useInterpreter) {
-    const argv = [opts.crewhausBin as string, "run", opts.specPath as string];
-    if (opts.resume && typeof opts.sessionId === "string" && /^sess_[0-9a-f]{16}$/.test(opts.sessionId)) {
-      argv.push("--resume", opts.sessionId);
-    }
-    return { mode: "interpreter", argv };
+  const compiled = (warning?: string): LaunchPlan => ({
+    mode: "compiled",
+    argv: ["bun", opts.entryPath ?? ""],
+    ...(warning === undefined ? {} : { warning }),
+  });
+  if (prefer === "compiled") return compiled();
+  if (!canInterpretShape(opts.shape, opts.runClass)) {
+    return compiled(
+      prefer === "interpreter"
+        ? `launch: interpreter requested, but \`crewhaus run\` executes only ${INTERPRETER_SHAPES.join(
+            " and ",
+          )} targets — the "${opts.shape ?? "unknown"}" shape is compile-only, so the compiled bundle is used instead.`
+        : undefined,
+    );
   }
-  return { mode: "compiled", argv: ["bun", opts.entryPath ?? ""] };
+  if (!(opts.specPath && opts.crewhausBin)) return compiled();
+  const argv = [opts.crewhausBin, "run", opts.specPath];
+  // `--resume` only where `crewhaus run` accepts it — `browser` is runnable but
+  // single-turn, and the flag would make it die instead of restarting.
+  if (
+    opts.resume &&
+    canResumeShape(opts.shape, opts.runClass) &&
+    typeof opts.sessionId === "string" &&
+    /^sess_[0-9a-f]{16}$/.test(opts.sessionId)
+  ) {
+    argv.push("--resume", opts.sessionId);
+  }
+  return { mode: "interpreter", argv };
 }
 
 /** Dynamic import of `name` resolved as if imported from `fromDir` (the
@@ -1257,7 +1338,12 @@ export class Supervisor {
           /* schema optional — form degrades to value-type inference */
         }
       }
-      const crewhausBin = resolveCrewhausBin(harnessRoot);
+      // What the settings view PROMISES about saving must match what `start()`
+      // will actually do — so it takes the same shape gate. A `crewhaus` on
+      // PATH does not make a compile-only shape interpreter-launched, and only
+      // the interpreter can resume a session.
+      const interpretable = canInterpretShape(this.config.shape, this.config.runClass);
+      const crewhausBin = interpretable ? resolveCrewhausBin(harnessRoot) : null;
       this.broadcast({
         type: "spec_data",
         ok: true,
@@ -1267,7 +1353,12 @@ export class Supervisor {
         schema,
         refs: envRefPresence(yaml, loadEnvChain(harnessRoot)),
         envPath: join(harnessRoot, ".env"),
-        launch: { mode: crewhausBin ? "interpreter" : "compiled", canResume: !!crewhausBin },
+        launch: {
+          mode: crewhausBin ? "interpreter" : "compiled",
+          // Runnable ≠ resumable: `browser` takes the interpreter but refuses
+          // `--resume`, so the badge must not promise a resume it won't get.
+          canResume: !!crewhausBin && canResumeShape(this.config.shape, this.config.runClass),
+        },
       });
     } catch (e) {
       this.broadcast({ type: "spec_data", ok: false, error: `Could not read the spec: ${(e as Error).message}` });
@@ -1333,19 +1424,25 @@ export class Supervisor {
    *  Path A fallback recompiles the bundle (no resume) or, absent a compiler,
    *  saves the spec with an honest "recompile needed" message. */
   private async recompileAndResume(harnessRoot: string, yaml: string, applied: number): Promise<void> {
-    const interpretable =
-      this.config.runClass === "stdio-interactive" || this.config.runClass === "stdio-oneshot";
+    // Same gate as `start()`: `crewhaus run` executes cli/browser only, so a
+    // compile-only shape must take the Path A recompile even with the CLI on
+    // PATH — otherwise this would latch `liveEdit` and pin every later start to
+    // an interpreter that exits 1.
+    const interpretable = canInterpretShape(this.config.shape, this.config.runClass);
     const crewhausBin = interpretable ? resolveCrewhausBin(harnessRoot) : null;
     if (interpretable && crewhausBin) {
-      // Path B — the interpreter re-reads the spec (free recompile) and resumes
-      // the same session natively. The latched sessionId drives `--resume`.
+      // Path B — the interpreter re-reads the spec (free recompile). On a
+      // resumable shape the latched sessionId also drives `--resume` and the
+      // session picks back up; `browser` is single-turn, so it restarts fresh
+      // and must not be reported as resumed.
+      const resumable = canResumeShape(this.config.shape, this.config.runClass);
       this.liveEdit = true;
       this.broadcast({
         type: "spec_patch_result",
         ok: true,
         applied,
         recompile: "interpreter",
-        resumed: !!this.sessionId,
+        resumed: resumable && !!this.sessionId,
         sessionId: this.sessionId,
       });
       if (this.proc) {
@@ -1494,15 +1591,18 @@ export class Supervisor {
     const entryPath = h.entry ? join(this.harnessDir, h.entry) : null;
 
     // Launch mode (Path A/B, §10.1). Interpreter (Path B) applies only to the
-    // stdio run classes; daemon-http/cf-worker keep their compiled entry. Path B
-    // needs a spec + a runnable `crewhaus` CLI; otherwise `bun <entry>` (Path A).
-    const interpretable =
-      this.config.runClass === "stdio-interactive" || this.config.runClass === "stdio-oneshot";
+    // stdio run classes AND only to the shapes `crewhaus run` executes (cli,
+    // browser) — every other target is compile-only and the interpreter would
+    // exit 1. Path B additionally needs a spec + a runnable `crewhaus` CLI;
+    // otherwise `bun <entry>` (Path A).
+    const interpretable = canInterpretShape(this.config.shape, this.config.runClass);
     const specPath = interpretable ? findSpecPath(harnessRoot) : null;
     const crewhausBin = specPath ? resolveCrewhausBin(harnessRoot) : null;
     let prefer = launchPreference(this.config, process.env);
     if (this.liveEdit && interpretable) prefer = "interpreter"; // sticky after a live edit
     const plan = selectLaunch({
+      shape: this.config.shape,
+      runClass: this.config.runClass,
       specPath,
       crewhausBin,
       entryPath,
@@ -1510,6 +1610,7 @@ export class Supervisor {
       resume: !!(opts && opts.resume),
       prefer,
     });
+    if (plan.warning) this.log(`[launch] ${plan.warning}`, "stderr");
 
     if (plan.mode === "compiled") {
       if (!h.entry) {

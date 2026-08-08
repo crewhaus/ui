@@ -254,12 +254,20 @@ describe("envRefPresence", () => {
 });
 
 // ── selectLaunch (Path B when spec + CLI, else Path A; resume argv) ───────────
+//
+// The SHAPE gate (`crewhaus run` executes cli/browser only) is pinned per-shape
+// in launch-mode.test.ts; these cases hold the shape fixed at cli and cover the
+// spec/CLI/prefer axes.
 
 const SID = "sess_0123456789abcdef";
+
+/** A cli harness — the shape/runClass pair for which Path B is applicable. */
+const CLI_SHAPE = { shape: "cli", runClass: "stdio-interactive" } as const;
 
 describe("selectLaunch", () => {
   test("Path B (interpreter) when a spec AND a crewhaus CLI are present", () => {
     const plan = selectLaunch({
+      ...CLI_SHAPE,
       specPath: "/h/crewhaus.yaml",
       crewhausBin: "/usr/local/bin/crewhaus",
       entryPath: "/h/agent.ts",
@@ -270,6 +278,7 @@ describe("selectLaunch", () => {
 
   test("threads the latched sessionId into --resume", () => {
     const plan = selectLaunch({
+      ...CLI_SHAPE,
       specPath: "/h/crewhaus.yaml",
       crewhausBin: "/bin/crewhaus",
       entryPath: "/h/agent.ts",
@@ -282,6 +291,7 @@ describe("selectLaunch", () => {
 
   test("does not add --resume for an invalid/absent sessionId", () => {
     const noSid = selectLaunch({
+      ...CLI_SHAPE,
       specPath: "/h/crewhaus.yaml",
       crewhausBin: "/bin/crewhaus",
       entryPath: "/h/agent.ts",
@@ -289,6 +299,7 @@ describe("selectLaunch", () => {
     });
     expect(noSid.argv).not.toContain("--resume");
     const badSid = selectLaunch({
+      ...CLI_SHAPE,
       specPath: "/h/crewhaus.yaml",
       crewhausBin: "/bin/crewhaus",
       entryPath: "/h/agent.ts",
@@ -300,28 +311,42 @@ describe("selectLaunch", () => {
 
   test("Path A (compiled) when there is no spec, or no CLI", () => {
     expect(
-      selectLaunch({ specPath: null, crewhausBin: "/bin/crewhaus", entryPath: "/h/agent.ts" }),
+      selectLaunch({
+        ...CLI_SHAPE,
+        specPath: null,
+        crewhausBin: "/bin/crewhaus",
+        entryPath: "/h/agent.ts",
+      }),
     ).toEqual({ mode: "compiled", argv: ["bun", "/h/agent.ts"] });
     expect(
-      selectLaunch({ specPath: "/h/crewhaus.yaml", crewhausBin: null, entryPath: "/h/agent.ts" }),
+      selectLaunch({
+        ...CLI_SHAPE,
+        specPath: "/h/crewhaus.yaml",
+        crewhausBin: null,
+        entryPath: "/h/agent.ts",
+      }),
     ).toEqual({ mode: "compiled", argv: ["bun", "/h/agent.ts"] });
   });
 
   test("prefer overrides: 'compiled' forces Path A; 'interpreter' still needs the CLI", () => {
     const forcedA = selectLaunch({
+      ...CLI_SHAPE,
       specPath: "/h/crewhaus.yaml",
       crewhausBin: "/bin/crewhaus",
       entryPath: "/h/agent.ts",
       prefer: "compiled",
     });
     expect(forcedA.mode).toBe("compiled");
+    expect(forcedA.warning).toBeUndefined(); // an honoured preference says nothing
     const wantB = selectLaunch({
+      ...CLI_SHAPE,
       specPath: "/h/crewhaus.yaml",
       crewhausBin: null,
       entryPath: "/h/agent.ts",
       prefer: "interpreter",
     });
     expect(wantB.mode).toBe("compiled"); // no CLI → falls back to A
+    expect(wantB.warning).toBeUndefined(); // a supported shape, just no CLI installed
   });
 });
 

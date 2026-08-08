@@ -134,6 +134,14 @@ shared host (`_shared/host.ts`) does the work:
   - *stdio* shapes (cli, graph, workflow, crew, pipeline, research, batch, voice,
     browser, eval, onchain, onchain-game) are spawned as `bun <entry>`, with
     stdin/stdout bridged to the browser.
+  - *cli* and *browser* additionally get the **interpreter** launch when a
+    `crewhaus.yaml` and a `crewhaus` CLI are both present: `crewhaus run <spec>`,
+    which re-reads the spec on every start, so a settings edit takes effect with
+    no recompile. Those are the only two targets `crewhaus run` executes — every
+    other target is compile-only, so the other shapes always take `bun <entry>`.
+    On **cli** the interpreter also resumes the session in place (`--resume`);
+    *browser* is single-turn, so it restarts fresh. See
+    [Configuration](#configuration) to pin either mode.
   - *daemon* shapes (channel, managed) are spawned on an internal port and
     reverse-proxied.
   - *cf-worker* shapes are imported and their `fetch` handler is invoked directly
@@ -170,6 +178,13 @@ When a run dies, the UI says why instead of a bare "agent exited":
 
 - `CREWHAUS_UI_PORT` — change the UI port (default `4100`).
 - `CREWHAUS_SANDBOX=noop` — disable the code-exec sandbox floor.
+- `CREWHAUS_UI_LAUNCH` (or `"launch"` in a shape's `config.json`) — pin how the
+  harness is spawned: `auto` (default), `compiled` (always `bun <entry>`), or
+  `interpreter` (`crewhaus run <spec>`). `interpreter` applies to the **cli** and
+  **browser** shapes only — asking for it on any other shape logs a warning to
+  the run log and uses the compiled bundle, because `crewhaus run` exits 1 on a
+  compile-only target. It also falls back to compiled when there is no spec or
+  no `crewhaus` CLI on PATH.
 - Anything in a `.env` (or an exported var) is forwarded to the harness; `PORT`
   for daemon shapes is assigned automatically. See
   [Secrets & environment](#secrets--environment).
