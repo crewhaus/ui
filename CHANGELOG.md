@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **The hybrid run is legible.** factory 0.6.0 publishes two new trace kinds,
+  and the feed renders both: `model_stage` (a cascade / draft-verify / guide /
+  consult / committee / shadow stage transition) and `model_directive` (a
+  `/model` pin typed at the composer). Stage cards name the strategy and stage
+  (`cascade · draft`), badge the role, carry the stage's own spend when the
+  runtime reports it, and — for a stage that never ran — say why through
+  `cause`, so *skipped — max_escalations* is distinguishable from a draft that
+  simply passed.
+- **Routing detail on `model_route`.** Beyond policy and reason, the card now
+  names the strategy stage, profile and spec arm it resolved to, the rule id or
+  classifier label that steered it, the `preRoute` hint, the pool scope, how
+  many arms were eligible, the quality floor's verdict (a floor-blocked exploit
+  is the one route decision rendered as a warning) and the route key a scoped
+  arm backed off to.
+- **Spend by role and by profile.** `accrue()` splits the run's cost and tokens
+  into `byRole` (primary / draft / judge / escalation / guide / classifier /
+  consult / committee / shadow / compaction / subagent) and `byProfile`
+  (`models:` profile) beside the flat totals it already kept, and tracks
+  `auxCostMicros` — the auxiliary spend `budget.judge_share` bounds. Every
+  shape's **Cost** tile gained a hover breakdown; new pure helpers
+  `CH.events.spendByRole()`, `spendByProfile()` and `spendTitle()` expose the
+  same data to shape apps. Tokens still come from `model_response` and cost
+  from `cost_accrual`, so the split survives a pricing-table miss exactly as
+  the totals do.
+- **Attribution on the model and cost cards.** A `model_response` or
+  `cost_accrual` that carries a role is badged with it and names its stage,
+  profile and — the first time this has been visible anywhere — the request
+  parameters the serving adapter silently dropped (`dropped temperature` for a
+  Claude 5 profile).
+
+  All of the above is additive: an event carrying none of the new fields
+  renders exactly as it did before, and an absent role reads as `primary`.
+
+### Fixed
+
+- The workflow shape's between-runs reset cleared its stats field by field and
+  missed `cacheTokens` and `unpriced` (and would have missed the new spend
+  maps), so those carried over into the next run. It now assigns a fresh
+  `newStats()`.
+
 ## [0.2.0] - 2026-08-08
 
 The first cut since 0.1.3 (2026-07-01). Everything from the 0.3.0 UI refresh

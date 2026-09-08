@@ -829,6 +829,9 @@
         ui.statEls.runs.textContent = String(stats.turns);
         ui.statEls.tokens.textContent = fmtTokens(stats.tokensIn + stats.tokensOut);
         ui.statEls.cost.textContent = CH.fmtUsd(stats.costMicros);
+        // v0.6.0: hover the cost tile for the per-role / per-profile split
+        // (empty, so no tooltip, on a run whose calls carry no attribution).
+        ui.statEls.cost.title = events.spendTitle(stats);
         if (ui.feedEmpty) ui.feedEmpty.style.display = ui.feed.childNodes.length ? "none" : "block";
       }
 

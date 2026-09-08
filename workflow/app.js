@@ -74,6 +74,9 @@
         statEls.tools.textContent = String(stats.tools);
         statEls.tokens.textContent = fmtTokens(stats.tokensIn + stats.tokensOut);
         statEls.cost.textContent = fmtUsd(stats.costMicros);
+        // v0.6.0: hover the cost tile for the per-role / per-profile split
+        // (empty, so no tooltip, on a run whose calls carry no attribution).
+        statEls.cost.title = events.spendTitle(stats);
         statEls.errors.textContent = String(stats.errors);
       }
 
@@ -293,9 +296,10 @@
         const q = (runInput.value || "").trim();
         if (!q && !api.config) return;
         lastQuery = q;
-        // reset run model
-        stats.turns = stats.tools = stats.errors = 0;
-        stats.costMicros = stats.tokensIn = stats.tokensOut = stats.subAgents = 0;
+        // reset run model — assign a whole fresh stats object (the field-by-field
+        // reset this replaced left `cacheTokens`, `unpriced` and, from v0.6.0,
+        // the per-role/profile spend maps carrying over from the previous run).
+        Object.assign(stats, events.newStats());
         clearTimeline();
         if (feedEl) clear(feedEl);
         if (resultBody) clear(resultBody);

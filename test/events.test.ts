@@ -154,3 +154,399 @@ describe("cost/token accrual (Phase 2 — decoupled from pricing)", () => {
     expect(s.unpriced).toBe(false);
   });
 });
+
+// ── v0.6.0 — model attribution, hybrid stages, per-role/profile spend ───────
+//
+// The 0.6.0 runtime publishes two new trace kinds (`model_stage`,
+// `model_directive`), routing detail on `model_route`, and optional
+// `role`/`stage`/`profile`/`effectiveParams` on `model_request` /
+// `model_response` / `cost_accrual`. Every one of those fields is optional on
+// the wire, so the first test of each pair pins the UNCHANGED rendering of an
+// event that carries none of them.
+
+describe("v0.6.0 model_stage — the turn's story", () => {
+  const stage = (over: Record<string, unknown>) =>
+    events.R.model_stage({
+      kind: "model_stage",
+      stage: "draft",
+      strategy: "cascade",
+      role: "draft",
+      model: "claude-haiku-4-5",
+      outcome: "started",
+      ...over,
+    });
+
+  test("a started stage names the strategy and the stage", () => {
+    const o = stage({});
+    expect(o.name).toBe("cascade · draft");
+    expect(o.title).toBe("started");
+    expect(o.icon).toBe("play");
+    expect(o.sub).toBe("claude-haiku-4-5");
+    expect(o.badge).toBe("draft");
+  });
+
+  test("a done stage carries its own spend", () => {
+    const o = stage({ outcome: "done", profile: "fast", costUsdMicros: 1200 });
+    expect(o.title).toBe("done");
+    expect(o.sev).toBe("accent");
+    expect(o.sub).toBe("claude-haiku-4-5 · profile fast");
+    expect(o.meta).toBe("$1200");
+  });
+
+  test("a skipped stage says WHY through `cause`, and is not an error", () => {
+    const o = stage({ stage: "escalate", role: "escalation", outcome: "skipped", cause: "max_escalations" });
+    expect(o.name).toBe("cascade · escalate");
+    expect(o.title).toBe("skipped — max_escalations");
+    expect(o.sev).toBe("muted"); // a cascade that never needed its strong rung is the GOOD case
+  });
+
+  test("a failed stage reads as an error", () => {
+    const o = stage({ stage: "verify", role: "judge", outcome: "failed", cause: "judge_share_exhausted" });
+    expect(o.icon).toBe("alert");
+    expect(o.sev).toBe("error");
+    expect(o.title).toBe("failed — judge_share_exhausted");
+  });
+
+  test("draft -> verify -> escalate reads as one sequence", () => {
+    const story = [
+      stage({ outcome: "done", costUsdMicros: 900 }),
+      stage({ stage: "verify", role: "judge", outcome: "done", costUsdMicros: 300 }),
+      stage({ stage: "escalate", role: "escalation", outcome: "skipped", cause: "draft_passed" }),
+    ].map((o) => `${o.name} ${o.title}`);
+    expect(story).toEqual([
+      "cascade · draft done",
+      "cascade · verify done",
+      "cascade · escalate skipped — draft_passed",
+    ]);
+  });
+
+  test("no cost is not $0 — the meta stays empty when the stage reports none", () => {
+    expect(stage({ outcome: "done" }).meta).toBe("");
+  });
+
+  test("an unknown outcome still renders (forward-compatible)", () => {
+    const o = stage({ outcome: "cancelled" as unknown as string });
+    expect(o.title).toBe("cancelled");
+    expect(o.icon).toBe("layers");
+  });
+
+  test("a primary-role stage shows no role badge", () => {
+    expect(stage({ role: "primary" }).badge).toBe("");
+  });
+});
+
+describe("v0.6.0 model_directive — a /model pin", () => {
+  test("an accepted directive names what it resolved to", () => {
+    const o = events.R.model_directive({
+      kind: "model_directive",
+      source: "repl",
+      requested: "fast",
+      resolved: "claude-haiku-4-5",
+      accepted: true,
+    });
+    expect(o.name).toBe("/model fast");
+    expect(o.title).toBe("pinned -> claude-haiku-4-5");
+    expect(o.sev).toBe("accent");
+    expect(o.badge).toBe("repl");
+    expect(o.badgeKind).toBe("ok");
+  });
+
+  test("a directive that resolves to itself does not repeat itself", () => {
+    const o = events.R.model_directive({
+      kind: "model_directive",
+      source: "seed",
+      requested: "fast",
+      resolved: "fast",
+      accepted: true,
+    });
+    expect(o.title).toBe("pinned");
+  });
+
+  test("a refused directive carries the runtime's reason", () => {
+    const o = events.R.model_directive({
+      kind: "model_directive",
+      source: "repl",
+      requested: "opus",
+      accepted: false,
+      reason: "unknown arm",
+    });
+    expect(o.title).toBe("refused");
+    expect(o.sub).toBe("unknown arm");
+    expect(o.sev).toBe("warn");
+    expect(o.badgeKind).toBe("warn");
+  });
+});
+
+describe("v0.6.0 model_route — the routing detail behind the pick", () => {
+  test("a 0.5.x route line renders exactly as before", () => {
+    const o = events.R.model_route({
+      kind: "model_route",
+      routeKey: "hard",
+      model: "claude-opus-4-8",
+      policy: "learned",
+      reason: "highest reward",
+    });
+    expect(o.sub).toBe("highest reward"); // no trailing separator, no empty detail
+    expect(o.sev).toBe("info");
+    expect(o.badge).toBe("hard");
+  });
+
+  test("strategy, profile, rule, scope and eligibility land on the detail line", () => {
+    const o = events.R.model_route({
+      kind: "model_route",
+      routeKey: "hard",
+      model: "claude-haiku-4-5",
+      specModel: "anthropic/claude-haiku-4-5",
+      policy: "rule",
+      reason: "matched",
+      strategy: "cascade",
+      stage: "draft",
+      profile: "fast",
+      ruleId: "short-prompts",
+      scope: "step:summarise",
+      eligible: ["fast", "strong"],
+    });
+    expect(o.sub).toBe(
+      "matched · cascade · draft · profile fast · spec anthropic/claude-haiku-4-5 · " +
+        "rule short-prompts · scope step:summarise · 2 eligible",
+    );
+  });
+
+  test("a floor-blocked exploit is the one route worth a colour", () => {
+    const o = events.R.model_route({
+      kind: "model_route",
+      routeKey: "easy",
+      model: "claude-sonnet-5",
+      policy: "learned",
+      reason: "floor-blocked",
+      floor: { arm: "strong", status: "blocked", blocked: ["fast"] },
+      backedOffTo: "easy",
+    });
+    expect(o.sev).toBe("warn");
+    expect(String(o.sub)).toContain("floor blocked (strong)");
+    expect(String(o.sub)).toContain("backed off to easy");
+  });
+
+  test("a classifier verdict and a preRoute hint are named", () => {
+    const o = events.R.model_route({
+      kind: "model_route",
+      routeKey: "hard",
+      model: "claude-opus-4-8",
+      policy: "classifier",
+      reason: "labelled",
+      classifierVerdict: { label: "code", model: "claude-haiku-4-5" },
+      hint: { source: "directive" },
+    });
+    expect(String(o.sub)).toContain("label code");
+    expect(String(o.sub)).toContain("hint directive");
+  });
+});
+
+describe("v0.6.0 attribution on model_response / cost_accrual", () => {
+  test("an unattributed response renders exactly as before", () => {
+    const o = events.R.model_response({
+      kind: "model_response",
+      model: "claude-sonnet-5",
+      usage: { input: 100, output: 40 },
+      stopReason: "end_turn",
+      durationMs: 900,
+    });
+    expect(o.sub).toBe("100 in · 40 out · end_turn");
+    expect(o.badge).toBe("");
+  });
+
+  test("a judge response is badged and labelled", () => {
+    const o = events.R.model_response({
+      kind: "model_response",
+      model: "claude-haiku-4-5",
+      role: "judge",
+      stage: "verify",
+      profile: "cheap-judge",
+      usage: { input: 10, output: 5 },
+      stopReason: "end_turn",
+      durationMs: 200,
+    });
+    expect(o.badge).toBe("judge");
+    expect(o.sub).toBe("10 in · 5 out · end_turn · role judge · stage verify · profile cheap-judge");
+  });
+
+  test("the adapter's silent parameter drop is finally visible", () => {
+    const o = events.R.model_response({
+      kind: "model_response",
+      model: "claude-opus-4-8",
+      usage: { input: 1, output: 1 },
+      stopReason: "end_turn",
+      durationMs: 1,
+      effectiveParams: { model: "claude-opus-4-8", maxTokens: 4096, dropped: ["temperature"] },
+    });
+    expect(String(o.sub)).toContain("dropped temperature");
+  });
+
+  test("an adapter that dropped nothing says nothing", () => {
+    const o = events.R.model_response({
+      kind: "model_response",
+      model: "claude-sonnet-5",
+      usage: { input: 1, output: 1 },
+      stopReason: "end_turn",
+      durationMs: 1,
+      effectiveParams: { model: "claude-sonnet-5", maxTokens: 4096, dropped: [] },
+    });
+    expect(o.sub).toBe("1 in · 1 out · end_turn");
+  });
+
+  test("an unattributed cost line renders exactly as before", () => {
+    const o = events.R.cost_accrual({
+      kind: "cost_accrual",
+      modelId: "claude-sonnet-5",
+      inputTokens: 100,
+      outputTokens: 40,
+      costUsdMicros: 1500,
+    });
+    expect(o.sub).toBe("100 in · 40 out");
+    expect(o.badge).toBe("");
+  });
+
+  test("an escalation's cost line says whose spend it is", () => {
+    const o = events.R.cost_accrual({
+      kind: "cost_accrual",
+      modelId: "claude-opus-4-8",
+      role: "escalation",
+      profile: "strong",
+      inputTokens: 100,
+      outputTokens: 40,
+      costUsdMicros: 9000,
+    });
+    expect(o.badge).toBe("escalation");
+    expect(o.sub).toBe("100 in · 40 out · role escalation · profile strong");
+  });
+
+  test("both new kinds have a renderer and reach the feed", () => {
+    for (const k of ["model_stage", "model_directive"]) {
+      expect(typeof events.R[k]).toBe("function");
+      expect(events.FEED_SKIP.has(k)).toBe(false);
+    }
+    expect(
+      events.render({
+        kind: "model_stage",
+        stage: "draft",
+        strategy: "cascade",
+        role: "draft",
+        model: "m",
+        outcome: "done",
+      }),
+    ).not.toBeNull();
+    expect(
+      events.render({ kind: "model_directive", source: "repl", requested: "fast", accepted: true }),
+    ).not.toBeNull();
+  });
+});
+
+describe("v0.6.0 spend by role and by profile", () => {
+  type Row = { key: string; calls: number; costMicros: number; tokensIn: number; tokensOut: number };
+  type Stats = Record<string, never>;
+  const mod = () =>
+    events as unknown as {
+      newStats: () => Stats;
+      accrue: (e: unknown, s: Stats) => Stats;
+      spendByRole: (s: Stats) => Row[];
+      spendByProfile: (s: Stats) => Row[];
+      spendTitle: (s: Stats) => string;
+    };
+
+  /** One model call: the response (tokens) and the accrual (cost) it produces. */
+  function call(s: Stats, over: Record<string, unknown>, cost: number, tokens: [number, number]) {
+    const { accrue } = mod();
+    accrue({ kind: "model_response", usage: { input: tokens[0], output: tokens[1] }, ...over }, s);
+    accrue(
+      {
+        kind: "cost_accrual",
+        modelId: "m",
+        costUsdMicros: cost,
+        inputTokens: tokens[0],
+        outputTokens: tokens[1],
+        ...over,
+      },
+      s,
+    );
+    return s;
+  }
+
+  test("an unattributed run lands entirely in `primary`", () => {
+    const { newStats, spendByRole, spendByProfile, spendTitle } = mod();
+    const s = call(newStats(), {}, 1500, [100, 40]);
+    expect(spendByRole(s)).toEqual([
+      { key: "primary", calls: 1, costMicros: 1500, tokensIn: 100, tokensOut: 40 },
+    ]);
+    expect(spendByProfile(s)).toEqual([]);
+    // Nothing to break down ⇒ no tooltip at all, rather than one that says
+    // "primary" and nothing else.
+    expect(spendTitle(s)).toBe("");
+  });
+
+  test("a cascade splits by role and by profile without disturbing the totals", () => {
+    const { newStats, spendByRole, spendByProfile } = mod();
+    const s = newStats();
+    call(s, { role: "draft", profile: "fast" }, 1000, [100, 20]);
+    call(s, { role: "judge", profile: "fast" }, 500, [50, 10]);
+    call(s, { role: "escalation", profile: "strong" }, 8000, [100, 60]);
+    const flat = s as unknown as { costMicros: number; tokensIn: number; tokensOut: number };
+    expect(flat.costMicros).toBe(9500);
+    expect(flat.tokensIn).toBe(250);
+    expect(flat.tokensOut).toBe(90);
+
+    const roles = spendByRole(s);
+    expect(roles.map((r) => r.key)).toEqual(["escalation", "draft", "judge"]); // dearest first
+    expect(roles.reduce((n, r) => n + r.costMicros, 0)).toBe(flat.costMicros);
+    expect(roles.reduce((n, r) => n + r.tokensIn, 0)).toBe(flat.tokensIn);
+
+    const profiles = spendByProfile(s);
+    expect(profiles).toEqual([
+      { key: "strong", calls: 1, costMicros: 8000, tokensIn: 100, tokensOut: 60 },
+      { key: "fast", calls: 2, costMicros: 1500, tokensIn: 150, tokensOut: 30 },
+    ]);
+  });
+
+  test("auxiliary spend (judge/guide/…) is tracked apart from the answer's own rungs", () => {
+    const { newStats } = mod();
+    const s = newStats();
+    call(s, { role: "draft" }, 1000, [10, 10]);
+    call(s, { role: "escalation" }, 4000, [10, 10]);
+    call(s, { role: "judge" }, 300, [10, 10]);
+    call(s, { role: "compaction" }, 200, [10, 10]);
+    call(s, {}, 700, [10, 10]);
+    const flat = s as unknown as { auxCostMicros: number; costMicros: number };
+    expect(flat.auxCostMicros).toBe(500); // judge + compaction only
+    expect(flat.costMicros).toBe(6200);
+  });
+
+  test("the aggregate summary accrual is still ignored by the split", () => {
+    const { newStats, accrue, spendByRole } = mod();
+    const s = newStats();
+    accrue({ kind: "cost_accrual", summary: true, costUsdMicros: 9999, role: "primary" }, s);
+    expect(spendByRole(s)).toEqual([]);
+  });
+
+  test("spendTitle summarises both groupings", () => {
+    const { newStats, spendTitle } = mod();
+    const s = newStats();
+    call(s, { role: "draft", profile: "fast" }, 1000, [10, 10]);
+    call(s, { role: "judge", profile: "fast" }, 500, [10, 10]);
+    expect(spendTitle(s)).toBe("By role: draft $1000 · judge $500\nBy profile: fast $1500");
+  });
+
+  test("a role name off the wire cannot reach Object.prototype", () => {
+    const { newStats, accrue, spendByRole } = mod();
+    const s = newStats();
+    accrue({ kind: "cost_accrual", role: "__proto__", costUsdMicros: 5, inputTokens: 1, outputTokens: 1 }, s);
+    expect(({} as Record<string, unknown>).costMicros).toBeUndefined();
+    expect(spendByRole(s).map((r) => r.key)).toEqual(["__proto__"]);
+  });
+
+  test("newStats() hands back fresh maps (a re-run does not inherit the last one)", () => {
+    const { newStats, spendByRole } = mod();
+    const first = call(newStats(), { role: "judge" }, 100, [1, 1]);
+    const second = newStats();
+    expect(spendByRole(first)).toHaveLength(1);
+    expect(spendByRole(second)).toEqual([]);
+  });
+});
