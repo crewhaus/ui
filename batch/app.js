@@ -392,6 +392,9 @@
         els.tTools.textContent = traceStats.tools;
         els.tTokens.textContent = fmtTokens(traceStats.tokensIn + traceStats.tokensOut);
         els.tCost.textContent = fmtUsd(traceStats.costMicros);
+        // v0.6.0: hover the cost tile for the per-role / per-profile split
+        // (empty, so no tooltip, on a run whose calls carry no attribution).
+        els.tCost.title = events.spendTitle(traceStats);
       }
 
       function refreshBoard() {

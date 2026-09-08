@@ -69,6 +69,9 @@
         statEls.turns.textContent = String(stats.turns);
         statEls.tokens.textContent = fmtTokens(stats.tokensIn + stats.tokensOut);
         statEls.cost.textContent = fmtUsd(stats.costMicros);
+        // v0.6.0: hover the cost tile for the per-role / per-profile split
+        // (empty, so no tooltip, on a run whose calls carry no attribution).
+        statEls.cost.title = events.spendTitle(stats);
       }
 
       function ensureNode(name) {

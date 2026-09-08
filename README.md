@@ -174,6 +174,42 @@ When a run dies, the UI says why instead of a bare "agent exited":
   last few stderr lines — to the exit broadcast, so the failure is explained
   even when the process died before emitting anything structured.
 
+## Hybrid runs and where the money went
+
+A harness can route a pool of models: a cheap draft checked by a judge, a
+stronger re-run when the check fails, a `/model` pin typed into the chat. The
+feed shows the **shape of the turn** rather than an undifferentiated run of
+model calls (factory ≥ 0.6.0):
+
+- **Stages.** The runtime publishes a stage card for each rung or side call
+  that *branches* the turn: `cascade · escalate` and `model_directed ·
+  escalate`, plus `guide`, `shadow`, `committee`, `member`, `tie-break` and
+  `consult`. Each is a started/done (or started/failed) pair carrying the
+  stage's spend when the runtime knows it. A stage that never ran says why —
+  *skipped — max_escalations*, *judge_share_exhausted*, *budget* — so a cheap
+  turn that stayed cheap is easy to tell from one that ran out of judge budget.
+
+  The cascade's draft rung and its judge call are not stage cards: a draft that
+  passes never branches, so nothing is published. They show up as attribution
+  instead — the role badge plus `stage draft` / `stage verify` on the model and
+  cost cards.
+- **Routing detail.** A route card names the stage it served, the profile and
+  spec model it resolved to, the rule or classifier label that steered it, how
+  many arms were eligible, and — when the quality floor refused every cheaper
+  arm — which arm the floor served and which ones it kept out.
+- **Directives.** A `/model` pin shows what was asked for, what it resolved to,
+  and — when it was refused — the runtime's own reason.
+- **Whose spend.** Draft, judge, escalation, guide, consult, committee, shadow,
+  compaction and sub-agent calls are badged with their role, and the run's
+  spend is accumulated per role and per `models:` profile beside the flat
+  total. A nested run reports its whole spend as one `subagent` roll-up (its
+  own per-call lines are on the child's bus, not this stream), and a call that
+  resolved no profile is grouped under `(none)` rather than dropped, so both
+  splits always sum to the total. Hover the **Cost** tile for them.
+
+All of it is additive. A harness that routes one model — or runs on an older
+factory — carries none of these fields and renders exactly as it always did.
+
 ## Configuration
 
 - `CREWHAUS_UI_PORT` — change the UI port (default `4100`).

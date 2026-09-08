@@ -186,6 +186,9 @@
         ui.statEls.tools.textContent = String(s.tools || 0);
         ui.statEls.tokens.textContent = fmtTokens((s.tokensIn || 0) + (s.tokensOut || 0));
         ui.statEls.cost.textContent = fmtUsd(s.costMicros || 0);
+        // v0.6.0: hover the cost tile for the per-role / per-profile split
+        // (empty, so no tooltip, on a run whose calls carry no attribution).
+        ui.statEls.cost.title = events.spendTitle(s);
       }
 
       // ── Score board (hero) ───────────────────────────────────────────────

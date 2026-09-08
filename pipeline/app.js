@@ -59,6 +59,9 @@
         statEls.cites.textContent = String(citeRows.size);
         statEls.tokens.textContent = CH.fmtTokens(stats.tokensIn + stats.tokensOut);
         statEls.cost.textContent = CH.fmtUsd(stats.costMicros);
+        // v0.6.0: hover the cost tile for the per-role / per-profile split
+        // (empty, so no tooltip, on a run whose calls carry no attribution).
+        statEls.cost.title = events.spendTitle(stats);
       }
 
       // ── derive citation markers from the answer prose ─────────────────────
