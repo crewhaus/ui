@@ -164,60 +164,117 @@ describe("cost/token accrual (Phase 2 — decoupled from pricing)", () => {
 // the wire, so the first test of each pair pins the UNCHANGED rendering of an
 // event that carries none of them.
 
-describe("v0.6.0 model_stage — the turn's story", () => {
+describe("v0.6.0 model_stage — the branches a turn took", () => {
+  // The shipped `model_stage` families: `escalate` (strategy `cascade` or
+  // `model_directed`), `guide`, `shadow`, `committee`, `member`, `tie-break`
+  // and `consult`. The default here is the cascade's escalation rung.
   const stage = (over: Record<string, unknown>) =>
     events.R.model_stage({
       kind: "model_stage",
-      stage: "draft",
+      stage: "escalate",
       strategy: "cascade",
-      role: "draft",
-      model: "claude-haiku-4-5",
+      role: "escalation",
+      model: "claude-opus-4-8",
       outcome: "started",
       ...over,
     });
 
   test("a started stage names the strategy and the stage", () => {
     const o = stage({});
-    expect(o.name).toBe("cascade · draft");
+    expect(o.name).toBe("cascade · escalate");
     expect(o.title).toBe("started");
     expect(o.icon).toBe("play");
-    expect(o.sub).toBe("claude-haiku-4-5");
-    expect(o.badge).toBe("draft");
+    expect(o.sub).toBe("claude-opus-4-8");
+    expect(o.badge).toBe("escalation");
   });
 
   test("a done stage carries its own spend", () => {
-    const o = stage({ outcome: "done", profile: "fast", costUsdMicros: 1200 });
+    const o = stage({ outcome: "done", profile: "strong", costUsdMicros: 1200 });
     expect(o.title).toBe("done");
     expect(o.sev).toBe("accent");
-    expect(o.sub).toBe("claude-haiku-4-5 · profile fast");
+    expect(o.sub).toBe("claude-opus-4-8 · profile strong");
     expect(o.meta).toBe("$1200");
   });
 
   test("a skipped stage says WHY through `cause`, and is not an error", () => {
-    const o = stage({ stage: "escalate", role: "escalation", outcome: "skipped", cause: "max_escalations" });
+    const o = stage({ outcome: "skipped", cause: "max_escalations" });
     expect(o.name).toBe("cascade · escalate");
     expect(o.title).toBe("skipped — max_escalations");
     expect(o.sev).toBe("muted"); // a cascade that never needed its strong rung is the GOOD case
   });
 
   test("a failed stage reads as an error", () => {
-    const o = stage({ stage: "verify", role: "judge", outcome: "failed", cause: "judge_share_exhausted" });
+    const o = stage({ outcome: "failed", cause: "upstream 529" });
     expect(o.icon).toBe("alert");
     expect(o.sev).toBe("error");
-    expect(o.title).toBe("failed — judge_share_exhausted");
+    expect(o.title).toBe("failed — upstream 529");
   });
 
-  test("draft -> verify -> escalate reads as one sequence", () => {
+  test("a side-call stage renders under its own strategy", () => {
+    const o = stage({ stage: "guide", strategy: "guide", role: "guide", model: "claude-haiku-4-5" });
+    expect(o.name).toBe("guide · guide");
+    expect(o.badge).toBe("guide");
+  });
+
+  // The runtime publishes a stage line only for the rungs and side calls that
+  // BRANCH a turn. A cascade's draft rung and its judge call are attribution on
+  // `model_response` / `cost_accrual` (`role: "draft"` + `stage draft`,
+  // `role: "judge"` + `stage verify`), never `model_stage` — so the escalation
+  // pair below is the whole stage story a failing cascade tells.
+  test("an escalating cascade reads as the draft's badge then one escalate pair", () => {
+    const draft = events.R.model_response({
+      kind: "model_response",
+      model: "claude-haiku-4-5",
+      usage: { input: 100, output: 40 },
+      stopReason: "end_turn",
+      durationMs: 400,
+      role: "draft",
+      stage: "draft",
+    });
+    // `role: "draft"` and `stage: "draft"` are the same word, so attribution()
+    // says it once. The judge's differ, so both show.
+    expect(draft.badge).toBe("draft");
+    expect(String(draft.sub)).toContain("role draft");
+
+    const judge = events.R.cost_accrual({
+      kind: "cost_accrual",
+      modelId: "claude-haiku-4-5",
+      inputTokens: 200,
+      outputTokens: 20,
+      costUsdMicros: 300,
+      role: "judge",
+      stage: "verify",
+    });
+    expect(judge.badge).toBe("judge");
+    expect(String(judge.sub)).toContain("role judge · stage verify");
+
     const story = [
-      stage({ outcome: "done", costUsdMicros: 900 }),
-      stage({ stage: "verify", role: "judge", outcome: "done", costUsdMicros: 300 }),
-      stage({ stage: "escalate", role: "escalation", outcome: "skipped", cause: "draft_passed" }),
+      stage({ stage: "escalate", role: "escalation", outcome: "started" }),
+      stage({ stage: "escalate", role: "escalation", outcome: "done", costUsdMicros: 8000 }),
     ].map((o) => `${o.name} ${o.title}`);
-    expect(story).toEqual([
-      "cascade · draft done",
-      "cascade · verify done",
-      "cascade · escalate skipped — draft_passed",
-    ]);
+    expect(story).toEqual(["cascade · escalate started", "cascade · escalate done"]);
+  });
+
+  test("a cascade the draft satisfied publishes only the skipped escalation", () => {
+    const o = stage({
+      stage: "escalate",
+      role: "escalation",
+      outcome: "skipped",
+      cause: "max_escalations",
+    });
+    expect(`${o.name} ${o.title}`).toBe("cascade · escalate skipped — max_escalations");
+  });
+
+  test("a self-escalation is the `model_directed` strategy, not `cascade`", () => {
+    const o = stage({
+      strategy: "model_directed",
+      stage: "escalate",
+      role: "escalation",
+      outcome: "started",
+      cause: "self",
+    });
+    expect(o.name).toBe("model_directed · escalate");
+    expect(o.title).toBe("started — self");
   });
 
   test("no cost is not $0 — the meta stays empty when the stage reports none", () => {
@@ -323,7 +380,11 @@ describe("v0.6.0 model_route — the routing detail behind the pick", () => {
       backedOffTo: "easy",
     });
     expect(o.sev).toBe("warn");
-    expect(String(o.sub)).toContain("floor blocked (strong)");
+    // `floor.arm` is the FLOOR arm — on `blocked` it is the arm that SERVED,
+    // and `floor.blocked` is the set it kept out. Naming only one of them
+    // reads as "strong was blocked", which is the opposite of what happened.
+    expect(String(o.sub)).toContain("floor served strong");
+    expect(String(o.sub)).toContain("refused fast");
     expect(String(o.sub)).toContain("backed off to easy");
   });
 
@@ -477,9 +538,13 @@ describe("v0.6.0 spend by role and by profile", () => {
     expect(spendByRole(s)).toEqual([
       { key: "primary", calls: 1, costMicros: 1500, tokensIn: 100, tokensOut: 40 },
     ]);
-    expect(spendByProfile(s)).toEqual([]);
+    // A call that resolved no profile is GROUPED, never dropped — the rows
+    // must always sum to the tile's own number.
+    expect(spendByProfile(s)).toEqual([
+      { key: "(none)", calls: 1, costMicros: 1500, tokensIn: 100, tokensOut: 40 },
+    ]);
     // Nothing to break down ⇒ no tooltip at all, rather than one that says
-    // "primary" and nothing else.
+    // "primary" / "(none)" and nothing else.
     expect(spendTitle(s)).toBe("");
   });
 
@@ -506,6 +571,20 @@ describe("v0.6.0 spend by role and by profile", () => {
     ]);
   });
 
+  test("a run with unattributed calls still has profile rows that sum to the total", () => {
+    const { newStats, spendByProfile, spendTitle } = mod();
+    const s = newStats();
+    call(s, {}, 5_000_000, [100, 40]); // the main turn, on no `models:` profile
+    call(s, { role: "judge", profile: "cheap" }, 500_000, [50, 10]);
+    const flat = s as unknown as { costMicros: number; tokensIn: number };
+    const profiles = spendByProfile(s);
+    expect(profiles.map((r) => r.key)).toEqual(["(none)", "cheap"]);
+    expect(profiles.reduce((n, r) => n + r.costMicros, 0)).toBe(flat.costMicros);
+    expect(profiles.reduce((n, r) => n + r.tokensIn, 0)).toBe(flat.tokensIn);
+    // …and the tooltip says where the remainder went rather than hiding 91%.
+    expect(spendTitle(s)).toContain("By profile: (none) $5000000 · cheap $500000");
+  });
+
   test("auxiliary spend (judge/guide/…) is tracked apart from the answer's own rungs", () => {
     const { newStats } = mod();
     const s = newStats();
@@ -519,11 +598,50 @@ describe("v0.6.0 spend by role and by profile", () => {
     expect(flat.costMicros).toBe(6200);
   });
 
-  test("the aggregate summary accrual is still ignored by the split", () => {
+  test("the optimizer's ROLE-LESS run total is still ignored by the split", () => {
     const { newStats, accrue, spendByRole } = mod();
     const s = newStats();
-    accrue({ kind: "cost_accrual", summary: true, costUsdMicros: 9999, role: "primary" }, s);
+    // A sum over per-call accruals already folded here — counting it doubles
+    // the run's spend.
+    accrue({ kind: "cost_accrual", summary: true, costUsdMicros: 9999 }, s);
     expect(spendByRole(s)).toEqual([]);
+    expect((s as unknown as { costMicros: number }).costMicros).toBe(0);
+  });
+
+  test("a nested run's ROLE-BEARING roll-up is folded", () => {
+    const { newStats, accrue, spendByRole, spendByProfile } = mod();
+    const s = newStats();
+    // @crewhaus/sub-agent-spawner re-publishes the child's whole spend on the
+    // PARENT bus as one summary accrual. The child ran on its own event bus,
+    // which carries no printer, so its per-call lines never reach this stream
+    // — drop this and the Cost tile is a whole child run behind the runtime's
+    // budget meter.
+    accrue(
+      {
+        kind: "cost_accrual",
+        summary: true,
+        role: "subagent",
+        profile: "fast",
+        modelId: "claude-haiku-4-5",
+        costUsdMicros: 7_000_000,
+        inputTokens: 900,
+        outputTokens: 300,
+      },
+      s,
+    );
+    expect((s as unknown as { costMicros: number }).costMicros).toBe(7_000_000);
+    expect(spendByRole(s).map((r) => [r.key, r.costMicros])).toEqual([["subagent", 7_000_000]]);
+    expect(spendByProfile(s).map((r) => [r.key, r.costMicros])).toEqual([["fast", 7_000_000]]);
+  });
+
+  test("a roll-up in an auxiliary role lands in the auxiliary total too", () => {
+    const { newStats, accrue } = mod();
+    const s = newStats();
+    accrue(
+      { kind: "cost_accrual", summary: true, role: "guide", costUsdMicros: 4000, inputTokens: 10, outputTokens: 5 },
+      s,
+    );
+    expect((s as unknown as { auxCostMicros: number }).auxCostMicros).toBe(4000);
   });
 
   test("spendTitle summarises both groupings", () => {

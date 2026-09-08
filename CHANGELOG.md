@@ -10,19 +10,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **The hybrid run is legible.** factory 0.6.0 publishes two new trace kinds,
-  and the feed renders both: `model_stage` (a cascade / draft-verify / guide /
-  consult / committee / shadow stage transition) and `model_directive` (a
-  `/model` pin typed at the composer). Stage cards name the strategy and stage
-  (`cascade · draft`), badge the role, carry the stage's own spend when the
-  runtime reports it, and — for a stage that never ran — say why through
-  `cause`, so *skipped — max_escalations* is distinguishable from a draft that
-  simply passed.
+  and the feed renders both: `model_stage` (a stage transition of the rungs and
+  side calls that branch a turn — `cascade · escalate`, `model_directed ·
+  escalate`, `guide`, `shadow`, `committee`, `member`, `tie-break`, `consult`)
+  and `model_directive` (a `/model` pin typed at the composer). Stage cards
+  name the strategy and stage, badge the role, carry the stage's own spend when
+  the runtime reports it, and — for a stage that never ran — say why through
+  `cause`, so *skipped — max_escalations* is distinguishable from *skipped —
+  judge_share_exhausted*. The cascade's draft rung and its judge call publish
+  no stage line (a draft that passes never branches); they read as attribution
+  — the role badge and `stage draft` / `stage verify` — on the model and cost
+  cards.
 - **Routing detail on `model_route`.** Beyond policy and reason, the card now
   names the strategy stage, profile and spec arm it resolved to, the rule id or
   classifier label that steered it, the `preRoute` hint, the pool scope, how
-  many arms were eligible, the quality floor's verdict (a floor-blocked exploit
-  is the one route decision rendered as a warning) and the route key a scoped
-  arm backed off to.
+  many arms were eligible, the quality floor's verdict — naming both the arm
+  the floor served and the arms it refused, since `ModelRouteFloor.arm` is the
+  floor arm rather than a blocked one — and the route key a scoped arm backed
+  off to. A floor-blocked exploit is the one route decision rendered as a
+  warning.
 - **Spend by role and by profile.** `accrue()` splits the run's cost and tokens
   into `byRole` (primary / draft / judge / escalation / guide / classifier /
   consult / committee / shadow / compaction / subagent) and `byProfile`
@@ -33,6 +39,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   same data to shape apps. Tokens still come from `model_response` and cost
   from `cost_accrual`, so the split survives a pricing-table miss exactly as
   the totals do.
+
+  Both splits sum to the flat total. A call that resolved no profile is grouped
+  under `(none)` rather than dropped (matching factory's own fold), and a
+  `summary: true` accrual that carries a role — a nested run's roll-up, such as
+  `@crewhaus/sub-agent-spawner`'s `subagent` total — is folded, because the
+  child runs on its own event bus and its per-call lines never reach this
+  stream. The optimizer's role-less run total stays ignored: it is a sum over
+  accruals already counted here.
 - **Attribution on the model and cost cards.** A `model_response` or
   `cost_accrual` that carries a role is badged with it and names its stage,
   profile and — the first time this has been visible anywhere — the request

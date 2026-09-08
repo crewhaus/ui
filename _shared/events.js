@@ -16,9 +16,9 @@
    v0.6.0 adds model attribution: the run's spend is accumulated per ROLE
    (primary / draft / judge / escalation / guide / …) and per `models:` PROFILE
    alongside the flat totals, and the hybrid strategies publish `model_stage` /
-   `model_directive` so a cascade's draft -> verify -> escalate reads as one
-   story in the feed. All of it is additive — an event carrying none of the new
-   fields renders exactly as it always did.
+   `model_directive` so the side calls and rungs a turn took are legible in the
+   feed. All of it is additive — an event carrying none of the new fields
+   renders exactly as it always did.
    ========================================================================== */
 (function () {
   "use strict";
@@ -52,6 +52,12 @@
   // run with no `models:` registry and no `model_pool` renders here exactly as
   // it did before this release.
   const PRIMARY_ROLE = "primary";
+
+  // The profile bucket for a call that resolved no `models:` profile. Matches
+  // factory's own fold (hangar-server's `NO_PROFILE`): a per-profile table
+  // whose rows do not sum to the total is worse than one that says where the
+  // remainder went, so an unattributed call is grouped, never dropped.
+  const NO_PROFILE = "(none)";
 
   // The AUXILIARY roles: model calls made in service of the run's answer rather
   // than as the answer itself. Mirrors the runtime's own AUXILIARY_MODEL_ROLES
@@ -118,7 +124,18 @@
       e.hint && e.hint.source && e.hint.source !== "none" ? `hint ${e.hint.source}` : "",
       e.scope && e.scope !== "main" ? `scope ${e.scope}` : "",
       Array.isArray(e.eligible) && e.eligible.length ? `${e.eligible.length} eligible` : "",
-      floor && floor.status === "blocked" ? `floor blocked (${floor.arm})` : "",
+      // `ModelRouteFloor.arm` is the FLOOR arm — on `blocked` it is the arm
+      // that SERVED (nothing cheaper was exploitable), and `blocked` is the
+      // set the floor kept out. Name both, in that order: a reader who sees
+      // only one arm id here will read it as the refused one.
+      floor && floor.status === "blocked"
+        ? joinParts([
+            `floor served ${floor.arm}`,
+            Array.isArray(floor.blocked) && floor.blocked.length
+              ? `refused ${floor.blocked.join(", ")}`
+              : "",
+          ])
+        : "",
       floor && floor.status === "unavailable" ? "floor unavailable" : "",
       e.backedOffTo ? `backed off to ${e.backedOffTo}` : "",
     ]);
@@ -385,13 +402,17 @@
       badge: e.reason || "",
     }),
     // ── Hybrid strategies (v0.6.0) ───────────────────────────────────────────
-    // One stage transition of a cascade / draft-verify / guide / consult /
-    // committee / shadow turn. Read down the feed the started+done pairs tell
-    // the turn's story — draft, then verify, then escalate — where 0.5.x showed
-    // an undifferentiated run of model calls. A stage that never ran says WHY
-    // through `cause` ("max_escalations", "judge_share_exhausted", …), which is
-    // the difference between "the cheap arm was good enough" and "we ran out of
-    // judge budget".
+    // One stage transition of a hybrid turn. The runtime publishes a stage
+    // line for the rungs and side calls that BRANCH the turn — `escalate`
+    // (strategy `cascade` or `model_directed`), `guide`, `shadow`,
+    // `committee`, `member`, `tie-break` and `consult` — as a started/done or
+    // started/failed pair. The cascade's own draft rung and its judge call are
+    // NOT stage events: they are attribution (`role: "draft"` / `role:
+    // "judge"`, `stage draft` / `stage verify`) riding the `model_response`
+    // and `cost_accrual` cards, so a turn the draft satisfied publishes no
+    // stage line at all. A stage that never ran says WHY through `cause`
+    // ("max_escalations", "judge_share_exhausted", …), which is the difference
+    // between "the cheap arm was good enough" and "we ran out of judge budget".
     model_stage: (e) => {
       const o = STAGE_OUTCOME[e.outcome] || { icon: "layers", sev: "info" };
       const verb = o.verb || String(e.outcome || "stage");
@@ -514,8 +535,9 @@
       // profile served it: role -> { calls, costMicros, tokensIn, tokensOut }.
       // Null-prototype maps so a role/profile name off the wire can never
       // reach Object.prototype. A run with no attribution on its events lands
-      // entirely in byRole.primary and leaves byProfile empty, so every
-      // existing tile keeps reading the flat totals unchanged.
+      // entirely in byRole.primary / byProfile["(none)"], so both maps always
+      // sum to the flat totals and every existing tile keeps reading those
+      // unchanged.
       byRole: Object.create(null),
       byProfile: Object.create(null),
       // Spend in the AUXILIARY roles (judge, guide, classifier, consult,
@@ -575,7 +597,10 @@
     if (roles.length > 1) {
       lines.push(`By role: ${roles.map((r) => `${r.key} ${fmtUsd(r.costMicros)}`).join(" · ")}`);
     }
-    if (profiles.length) {
+    // A run that resolved no profile at all lands wholly in `(none)`, which is
+    // a row saying nothing — the profile analogue of the single-`primary`
+    // case the role guard above suppresses.
+    if (profiles.length && !(profiles.length === 1 && profiles[0].key === NO_PROFILE)) {
       lines.push(`By profile: ${profiles.map((r) => `${r.key} ${fmtUsd(r.costMicros)}`).join(" · ")}`);
     }
     return lines.join("\n");
@@ -611,8 +636,8 @@
         // totals are: model_response.usage survives a pricing-table miss.
         const rb = bucketOf(s.byRole, roleOf(ev));
         rb.calls++;
-        const pb = ev.profile ? bucketOf(s.byProfile, ev.profile) : null;
-        if (pb) pb.calls++;
+        const pb = bucketOf(s.byProfile, ev.profile || NO_PROFILE);
+        pb.calls++;
         if (ev.usage) {
           const inTok = ev.usage.input || 0;
           const outTok = ev.usage.output || 0;
@@ -621,23 +646,34 @@
           s.cacheTokens += (ev.usage.cacheRead || 0) + (ev.usage.cacheCreate || 0);
           rb.tokensIn += inTok;
           rb.tokensOut += outTok;
-          if (pb) {
-            pb.tokensIn += inTok;
-            pb.tokensOut += outTok;
-          }
+          pb.tokensIn += inTok;
+          pb.tokensOut += outTok;
         }
         break;
       }
       case "cost_accrual":
-        // Per-response accruals only (not the aggregate summary variant).
-        if (!ev.summary) {
+        // `summary: true` wears one flag over two different lines, and this
+        // stream's scope decides which to fold — the same call
+        // @crewhaus/cost-tracker makes on the live parent bus.
+        //
+        //   ROLE-LESS  — the optimizer orchestrator's run total, a sum over
+        //                per-call accruals already folded here. Ignored, or
+        //                the run's spend doubles.
+        //   ROLE-BEARING — a NESTED run's roll-up re-published on this bus
+        //                (@crewhaus/sub-agent-spawner's `role: "subagent"`
+        //                total). The child runs on its OWN event bus, which
+        //                carries no printer, so its per-call lines never reach
+        //                this stream at all: the roll-up is the only record of
+        //                that spend here, and dropping it puts the Cost tile
+        //                a whole child run behind the runtime's budget meter.
+        if (!ev.summary || ev.role !== undefined) {
           const cost = ev.costUsdMicros || 0;
           s.costMicros += cost;
           // cost-tracker copies role/stage/profile verbatim from the response
           // onto the accrual, so the split needs no pairing on this side.
           const role = roleOf(ev);
           bucketOf(s.byRole, role).costMicros += cost;
-          if (ev.profile) bucketOf(s.byProfile, ev.profile).costMicros += cost;
+          bucketOf(s.byProfile, ev.profile || NO_PROFILE).costMicros += cost;
           if (AUXILIARY_ROLES.has(role)) s.auxCostMicros += cost;
           // Unpriced model: factory sets `unpriced:true` on a pricing miss;
           // fall back to the robust signal (zero cost but real tokens) for
