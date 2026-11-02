@@ -256,7 +256,8 @@ factory — carries none of these fields and renders exactly as it always did.
   computer only). Any other address needs `CREWHAUS_UI_KEY`.
 - `CREWHAUS_UI_KEY` — a key you choose (32 or more letters, digits, `-` or `_`;
   `openssl rand -hex 32` fits) instead of a new one each start. The UI reads it
-  once and keeps it out of the harness's environment. See
+  once and keeps it out of the harness's and the worker's environment and out
+  of the requests it forwards to them. See
   [Opening the UI, and from another device](#opening-the-ui-and-from-another-device).
 - `CREWHAUS_SANDBOX=noop` — disable the code-exec sandbox floor.
 - `CREWHAUS_UI_LAUNCH` (or `"launch"` in a shape's `config.json`) — pin how the

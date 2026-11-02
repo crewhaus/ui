@@ -488,9 +488,9 @@ describe("childEnv", () => {
 
   test("every child the host starts gets an explicit environment", () => {
     // Bun hands a child spawned without `env` the environment this process
-    // started with, even after a variable is removed from process.env. So the
-    // key stays out of `bun install`, `bun add` and the harness only because
-    // each spawn passes its environment explicitly.
+    // started with, even after a variable is removed from process.env. So each
+    // spawn passes its environment explicitly: that is what keeps the key out
+    // of the environment of `bun install`, `bun add` and the harness child.
     const src = readFileSync(join(import.meta.dir, "..", "_shared", "host.ts"), "utf8");
     const calls = [...src.matchAll(/\bspawn\(/g)].map((m) => src.slice(m.index, src.indexOf("});", m.index)));
     expect(calls.length).toBe(3);
@@ -724,9 +724,9 @@ describe("server (in-repo layout: the harness inside the shape dir)", () => {
   });
 });
 
-// ── The harness never sees the key ───────────────────────────────────────────
+// ── What the host hands the harness carries no key ───────────────────────────
 
-describe("the worker never sees the key", () => {
+describe("the host keeps the key out of what it hands the worker", () => {
   let h: ServeHandle;
   let opKey: string;
   let afterServe: string | undefined;
@@ -774,14 +774,14 @@ describe("the worker never sees the key", () => {
     expect(keyOf(h)).toBe(opKey);
   });
 
-  test("not in its request headers, its env, or the process environment", async () => {
+  test("not in the request it forwards, the env it passes, or process.env", async () => {
     const r = await get(h, "/worker/echo", opKey);
     expect(r.status).toBe(200);
     expect(JSON.parse(r.body)).toEqual({ sawHeader: false, envHasKey: false, procHasKey: false });
   });
 });
 
-describe("the daemon never sees the key, and is started on loopback", () => {
+describe("the host keeps the key out of what it hands the daemon, and starts it on loopback", () => {
   let h: ServeHandle;
   let key: string;
 

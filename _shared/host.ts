@@ -1766,7 +1766,7 @@ async function runWorker(
     ...(process.env as Record<string, string>),
     ...parseEnvFile(join(harnessDir, ".dev.vars")),
   };
-  // The UI key belongs to the host alone, whichever file or variable set it.
+  // Keep the UI key out of the worker's env, whichever file or variable set it.
   Reflect.deleteProperty(env, "CREWHAUS_UI_KEY");
   const url = new URL(req.url);
   const body =
@@ -2003,7 +2003,8 @@ export class MemoryWatcher {
 //   - every route except the page's own files needs the key, which is new on
 //     every start and printed as a link (`…/#k=<key>`);
 //   - the WebSocket accepts only its own page as `Origin`;
-//   - the key stays out of the harness's environment and its proxied requests.
+//   - the host keeps the key out of the harness's and the worker's environment
+//     and out of the requests it forwards to them.
 
 /** Where the host listens unless told otherwise: this computer only. */
 export const DEFAULT_HOST = "127.0.0.1";
@@ -2258,10 +2259,9 @@ export type ServeOptions = {
    * A key you chose ({@link OPERATOR_KEY_RE}; `openssl rand -hex 32` fits).
    * Default: `CREWHAUS_UI_KEY` env, else a new random key on every start.
    * `serve()` reads `CREWHAUS_UI_KEY` once and removes it from `process.env`,
-   * and keeps the key out of the harness's and the worker's environment.
-   * Code running inside this process could still read the environment the
-   * process started with, so set the key in your shell, not in the harness's
-   * `.env`.
+   * and keeps the key out of the harness's and the worker's environment and
+   * out of the requests it forwards to them. Set the key in your shell, not in
+   * the harness's `.env`, which the harness itself can read.
    */
   key?: string;
 };
