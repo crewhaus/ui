@@ -10,7 +10,7 @@ From a directory that holds your compiled harness (and its `crewhaus.yaml`):
 
 ```bash
 bunx @crewhaus/ui          # detect the shape, write a runner, install the dep
-bun crewhaus-ui.ts         # run it  ->  http://localhost:4100
+bun crewhaus-ui.ts         # run it, then open the link it prints
 ```
 
 `bunx @crewhaus/ui` auto-detects the shape from your spec's `target:` and the
@@ -30,16 +30,21 @@ bunx @crewhaus/ui serve            # run now, no file written
 bunx @crewhaus/ui list             # list all shapes
 ```
 
-Flags: `--dir <harness>` `--out <file>` `--port <n>` `--serve` `--shape <name>`
-`--force` `--no-install`. Run `bunx @crewhaus/ui --help` for the full list.
+Flags: `--dir <harness>` `--out <file>` `--port <n>` `--host <addr>` `--serve`
+`--shape <name>` `--force` `--no-install`. Run `bunx @crewhaus/ui --help` for
+the full list.
 
 ## Programmatic API
 
 ```ts
 import { serve, detectShape, scaffold, listShapes } from "@crewhaus/ui";
 
-serve({ shape: "graph", harnessDir: "./build", port: 4100 });
+const ui = serve({ shape: "graph", harnessDir: "./build", port: 4100 });
+console.log(ui.link); // the link it prints
+await ui.stop();
 ```
+
+`ui.link` carries the key that opens the UI, so treat it like a password.
 
 ## Serve a standalone harness UI
 
@@ -51,10 +56,10 @@ resolves the spec and bundle from the current working directory:
 cd starters/<name>          # if copied elsewhere, cd into that copy
 bunx crewhaus compile crewhaus.yaml -o dist
 bunx @crewhaus/ui          # detect the shape, write a runner, install the dep
-bun crewhaus-ui.ts         # run it  ->  http://localhost:4100
+bun crewhaus-ui.ts         # run it, then open the link it prints
 ```
 
-That's it. Open the URL and press **Start** (or **Run**).
+That's it. Open the link it prints and press **Start** (or **Run**).
 
 ### Contributors / develop against this repo
 
@@ -64,8 +69,42 @@ in-repo contributor dev loop, run from the repo root — not the end-user path:
 ```
 crewhaus compile crewhaus.yaml -o build      # compile your spec to a shape
 cp build/* ui/<shape>/harness/               # drop the compiled files in
-bun ui/<shape>/serve.ts                      # run the UI  ->  http://localhost:4100
+bun ui/<shape>/serve.ts                      # run the UI, then open the link it prints
 ```
+
+## Opening the UI, and from another device
+
+The UI listens on this computer only. Each time it starts, it prints a link
+with a new key:
+
+```text
+  > http://127.0.0.1:4100/#k=…   open this link to sign in (it works on this computer only)
+```
+
+- Open that link. The tab keeps the key until you close it; a new tab needs
+  the link again.
+- Scripts send the key in an `x-crewhaus-ui-key` header.
+- **From another device**, forward the port with an SSH tunnel (over Tailscale
+  or any network), then open the same link there:
+
+  ```bash
+  ssh -L 4100:127.0.0.1:4100 <this computer>
+  ```
+
+- Or choose a key and an address yourself, for example this computer's
+  Tailscale address. Traffic is not encrypted, so do this only on a network
+  you trust:
+
+  ```bash
+  export CREWHAUS_UI_KEY="$(openssl rand -hex 32)"
+  bunx @crewhaus/ui serve --host <this computer's address>   # or CREWHAUS_UI_HOST
+  ```
+
+- A proxy that serves the UI under another address (a reverse proxy,
+  `tailscale serve`) cannot open the UI's live connection while it listens on
+  this computer only. Use the SSH tunnel or your own key instead.
+- Set the key in your shell, not in the harness's `.env`, which the harness
+  itself can read.
 
 ## Shapes
 
@@ -213,6 +252,12 @@ factory — carries none of these fields and renders exactly as it always did.
 ## Configuration
 
 - `CREWHAUS_UI_PORT` — change the UI port (default `4100`).
+- `CREWHAUS_UI_HOST` — the address the UI listens on (default `127.0.0.1`, this
+  computer only). Any other address needs `CREWHAUS_UI_KEY`.
+- `CREWHAUS_UI_KEY` — a key you choose (32 or more letters, digits, `-` or `_`;
+  `openssl rand -hex 32` fits) instead of a new one each start. The UI reads it
+  once and keeps it out of the harness's environment. See
+  [Opening the UI, and from another device](#opening-the-ui-and-from-another-device).
 - `CREWHAUS_SANDBOX=noop` — disable the code-exec sandbox floor.
 - `CREWHAUS_UI_LAUNCH` (or `"launch"` in a shape's `config.json`) — pin how the
   harness is spawned: `auto` (default), `compiled` (always `bun <entry>`), or
@@ -221,8 +266,9 @@ factory — carries none of these fields and renders exactly as it always did.
   the run log and uses the compiled bundle, because `crewhaus run` exits 1 on a
   compile-only target. It also falls back to compiled when there is no spec or
   no `crewhaus` CLI on PATH.
-- Anything in a `.env` (or an exported var) is forwarded to the harness; `PORT`
-  for daemon shapes is assigned automatically. See
+- Anything in a `.env` (or an exported var) is forwarded to the harness, except
+  `CREWHAUS_UI_KEY`; `PORT` for daemon shapes is assigned automatically, and
+  `HOST=127.0.0.1` unless you set `HOST`. See
   [Secrets & environment](#secrets--environment).
 
 ## Folder layout

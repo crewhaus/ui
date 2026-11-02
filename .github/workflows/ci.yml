@@ -118,7 +118,8 @@ jobs:
           done
           test "${ok:-0}" = 1 || { echo "UI never came up"; cat /tmp/smoke.log; exit 1; }
 
-          # The page and the shared assets the page loads must all be served.
+          # The page and the shared assets the page loads must all be served,
+          # without a key: they are the only public routes.
           for path in / /_shared/ui.css /_shared/ui.js /_shared/events.js /_shared/panels.js \
                       /_shared/views.js /_shared/app-kit.js /_shared/failure.js /app.js; do
             code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:4199$path")
@@ -128,3 +129,86 @@ jobs:
           # It must have detected the shape from the spec's target:.
           grep -q "Graph" /tmp/smoke.log || { echo "shape detection failed"; cat /tmp/smoke.log; exit 1; }
           echo "smoke ok"
+
+      # The server from the step above is still running on 4199.
+      - name: It listens on this computer only and needs the printed key
+        working-directory: /tmp/smoke
+        run: |
+          set -euo pipefail
+
+          # Read from the socket table, never from the server itself.
+          addrs=$(ss -ltnH 'sport = :4199' | awk '{print $4}')
+          test -n "$addrs" || { echo "::error::ss found no listener on port 4199"; exit 1; }
+          for a in $addrs; do
+            test "$a" = "127.0.0.1:4199" || { echo "::error::listening on $a, expected only 127.0.0.1:4199"; exit 1; }
+          done
+
+          # The banner prints a link that carries a new 256-bit key.
+          link=$(grep -o 'http://127\.0\.0\.1:4199/#k=[A-Za-z0-9_-]*' /tmp/smoke.log | head -1 || true)
+          key=${link##*#k=}
+          test "${#key}" -eq 43 || { echo "::error::the start banner has no link with a key"; exit 1; }
+
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:4199/api/state)
+          test "$code" = 401 || { echo "::error::/api/state without the key returned $code, expected 401"; exit 1; }
+          code=$(curl -s -o /dev/null -w '%{http_code}' -H "x-crewhaus-ui-key: $key" http://127.0.0.1:4199/api/state)
+          test "$code" = 200 || { echo "::error::/api/state with the key returned $code, expected 200"; exit 1; }
+
+          # The host serves only the page's own files, even with the key. The
+          # shape's assets sit six directories below /, so eight steps up reach
+          # /etc/hostname (four would stop short and prove nothing).
+          code=$(curl -s --path-as-is -o /dev/null -w '%{http_code}' -H "x-crewhaus-ui-key: $key" \
+            'http://127.0.0.1:4199/..%2F..%2F..%2F..%2F..%2F..%2F..%2F..%2Fetc%2Fhostname')
+          test "$code" != 200 || { echo "::error::a file outside the asset directories was served"; exit 1; }
+
+          # The socket accepts only its own page, and only with the key. (The
+          # 101 case is in the unit tests: an open upgrade keeps curl waiting.)
+          ws() {
+            curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
+              -H 'Connection: Upgrade' -H 'Upgrade: websocket' -H 'Sec-WebSocket-Version: 13' \
+              -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' "$@" http://127.0.0.1:4199/ws || true
+          }
+          code=$(ws -H 'Origin: http://example.com' -H "x-crewhaus-ui-key: $key")
+          test "$code" = 403 || { echo "::error::/ws from another site returned $code, expected 403"; exit 1; }
+          code=$(ws -H 'Origin: http://127.0.0.1:4199')
+          test "$code" = 401 || { echo "::error::/ws without the key returned $code, expected 401"; exit 1; }
+          echo "loopback bind, key and origin answers ok"
+
+      - name: Another address without a key of the operator's own is refused
+        working-directory: /tmp/smoke
+        run: |
+          set -euo pipefail
+          set +e
+          CREWHAUS_UI_PORT=4198 timeout 20 bun node_modules/@crewhaus/ui/bin/cli.ts serve --dir /tmp/smoke \
+            --host 0.0.0.0 > /tmp/refused.log 2>&1
+          rc=$?
+          set -e
+          # 1 is the refusal; 124 would mean it served until the timeout.
+          test "$rc" -eq 1 || { echo "::error::--host 0.0.0.0 without a key exited $rc, expected 1"; cat /tmp/refused.log; exit 1; }
+          grep -q CREWHAUS_UI_KEY /tmp/refused.log \
+            || { echo "::error::the refusal does not name CREWHAUS_UI_KEY"; cat /tmp/refused.log; exit 1; }
+          test -z "$(ss -ltnH 'sport = :4198')" || { echo "::error::something listens on 4198 after the refusal"; exit 1; }
+          echo "refused: $(cat /tmp/refused.log)"
+
+      - name: Another address with a key of the operator's own
+        working-directory: /tmp/smoke
+        run: |
+          set -euo pipefail
+          opkey=$(openssl rand -hex 32)
+          CREWHAUS_UI_KEY="$opkey" CREWHAUS_UI_PORT=4197 bun node_modules/@crewhaus/ui/bin/cli.ts serve \
+            --dir /tmp/smoke --host 0.0.0.0 > /tmp/opt-in.log 2>&1 &
+          ok=0
+          for _ in $(seq 1 30); do
+            if curl -fsS -o /dev/null http://127.0.0.1:4197/; then ok=1; break; fi
+            sleep 1
+          done
+          test "$ok" = 1 || { echo "::error::the UI with an operator key never came up"; cat /tmp/opt-in.log; exit 1; }
+
+          # This also proves the ss parsing above can see a wildcard.
+          wild=$(ss -ltnH 'sport = :4197' | awk '{print $4}' | grep -E '^(0\.0\.0\.0|\*|\[::\]):4197$' || true)
+          test -n "$wild" || { echo "::error::no listener on every address for port 4197"; ss -ltnH 'sport = :4197'; exit 1; }
+
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:4197/api/state)
+          test "$code" = 401 || { echo "::error::/api/state without the operator key returned $code, expected 401"; exit 1; }
+          code=$(curl -s -o /dev/null -w '%{http_code}' -H "x-crewhaus-ui-key: $opkey" http://127.0.0.1:4197/api/state)
+          test "$code" = 200 || { echo "::error::/api/state with the operator key returned $code, expected 200"; exit 1; }
+          echo "operator key and address ok"
