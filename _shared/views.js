@@ -1112,35 +1112,87 @@
   function preBlock(text) {
     return CH.el("pre", { class: "v-file-pre", text });
   }
+  // The object URLs a file viewer made for the file it shows; revoked when it
+  // shows another one.
+  const viewerUrls = new WeakMap();
+  // Raster images are re-typed by extension: an image type never runs script.
+  const RASTER_TYPES = {
+    png: "image/png",
+    jpg: "image/jpeg",
+    jpeg: "image/jpeg",
+    gif: "image/gif",
+    webp: "image/webp",
+    avif: "image/avif",
+    bmp: "image/bmp",
+    ico: "image/x-icon",
+  };
   function viewFile(viewer, node) {
+    for (const u of viewerUrls.get(viewer) || []) URL.revokeObjectURL(u);
+    const urls = [];
+    viewerUrls.set(viewer, urls);
+    const objectUrl = (blob) => {
+      const u = URL.createObjectURL(blob);
+      urls.push(u);
+      return u;
+    };
+
     CH.clear(viewer);
+    // "Open raw" opens a copy this page fetched (a new tab could not send the
+    // key). It has no target until the file has loaded.
+    const raw = CH.el(
+      "a",
+      {
+        class: "btn ghost sm icon-only",
+        target: "_blank",
+        rel: "noopener",
+        title: "Open raw",
+        "aria-label": "Open raw",
+        "aria-disabled": "true",
+      },
+      CH.icon("download", 13),
+    );
+    const openRawAt = (u) => {
+      raw.setAttribute("href", u);
+      raw.removeAttribute("aria-disabled");
+    };
     const head = CH.el("div", { class: "v-file-head" }, [
       CH.icon(iconForFile(node.name), 13),
       CH.el("span", { class: "v-file-name", text: node.name }),
       CH.el("span", { class: "grow" }),
-      CH.el(
-        "a",
-        { class: "btn ghost sm icon-only", href: node.url, target: "_blank", rel: "noopener", title: "Open raw" },
-        CH.icon("download", 13),
-      ),
+      raw,
     ]);
     const body = CH.el("div", { class: "v-file-body" });
     viewer.appendChild(head);
     viewer.appendChild(body);
 
     const ext = extOf(node.name);
-    if (IMG_EXT.has(ext)) {
-      body.appendChild(CH.el("img", { class: "v-file-img", src: node.url, alt: node.name }));
-      return;
-    }
+    const rasterType = RASTER_TYPES[ext];
     body.appendChild(empty("Loading…"));
     fetch(node.url)
       .then((r) => {
         if (!r.ok) throw new Error(String(r.status));
-        return r.text();
+        return rasterType ? r.blob() : r.text();
       })
-      .then((text) => {
+      .then((data) => {
+        if (viewerUrls.get(viewer) !== urls) return; // another file took the viewer
         CH.clear(body);
+        if (rasterType) {
+          const u = objectUrl(new Blob([data], { type: rasterType }));
+          body.appendChild(CH.el("img", { class: "v-file-img", src: u, alt: node.name }));
+          openRawAt(u);
+          return;
+        }
+        const text = data;
+        // An object URL opens in this page's origin, so everything else opens
+        // raw as plain text: a harness file never runs there as HTML or SVG.
+        openRawAt(objectUrl(new Blob([text], { type: "text/plain; charset=utf-8" })));
+        if (ext === "svg") {
+          // A data: URL, so even "Open image in new tab" never shows it as a
+          // document in this page's origin.
+          const src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(text)}`;
+          body.appendChild(CH.el("img", { class: "v-file-img", src, alt: node.name }));
+          return;
+        }
         const truncated = text.length > 400000;
         const capped = truncated ? text.slice(0, 400000) : text;
         if (ext === "md") {

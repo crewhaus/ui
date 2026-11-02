@@ -15,7 +15,7 @@ import { basename, resolve } from "node:path";
 import { join } from "node:path";
 import { spawn } from "bun";
 import { detectShape, listShapes, resolveHarnessDir, scaffold } from "../src/scaffold.ts";
-import { serve } from "../_shared/host.ts";
+import { serve, ServeRefusedError, type ServeOptions } from "../_shared/host.ts";
 
 const HELP = `crewhaus-ui — drop-in UIs for compiled CrewHaus harnesses
 
@@ -28,6 +28,7 @@ Options
   -d, --dir <dir>     harness dir (compiled files). Default: auto (., ./build, ./dist)
   -o, --out <file>    runner file to write. Default: crewhaus-ui.ts
   -p, --port <n>      UI port. Default: 4100 (or $CREWHAUS_UI_PORT)
+      --host <addr>   listen address. Default: 127.0.0.1 (this computer only); any other address needs CREWHAUS_UI_KEY
   -s, --serve         run the UI right after scaffolding
       --shape <name>  force the shape (skip auto-detection)
       --force         overwrite an existing runner file
@@ -42,6 +43,16 @@ function die(msg: string): never {
   process.exit(1);
 }
 
+/** Run the UI; a refused address or key is a one-line error, not a stack. */
+function serveOrDie(opts: ServeOptions): void {
+  try {
+    serve(opts);
+  } catch (e) {
+    if (e instanceof ServeRefusedError) die(e.message);
+    throw e;
+  }
+}
+
 // ── Parse argv ──────────────────────────────────────────────────────────────
 const argv = process.argv.slice(2);
 const flags: {
@@ -52,6 +63,7 @@ const flags: {
   dir?: string;
   out?: string;
   port?: number;
+  host?: string;
   shape?: string;
 } = {};
 const positional: string[] = [];
@@ -64,7 +76,12 @@ for (let i = 0; i < argv.length; i++) {
   else if (a === "-d" || a === "--dir") flags.dir = argv[++i];
   else if (a === "-o" || a === "--out") flags.out = argv[++i];
   else if (a === "-p" || a === "--port") flags.port = Number(argv[++i]);
-  else if (a === "--shape") flags.shape = argv[++i];
+  else if (a === "--host") {
+    // No --key flag on purpose: other users of this computer can read argv.
+    const v = argv[++i];
+    if (!v || v.startsWith("-")) die("--host needs an address");
+    flags.host = v;
+  } else if (a === "--shape") flags.shape = argv[++i];
   else if (a.startsWith("-")) die(`unknown flag: ${a}`);
   else positional.push(a);
 }
@@ -99,7 +116,7 @@ if (!shapes.includes(shape)) {
 
 // ── serve: run now ──────────────────────────────────────────────────────────
 if (cmd === "serve") {
-  serve({ shape, harnessDir, port: flags.port });
+  serveOrDie({ shape, harnessDir, port: flags.port, host: flags.host });
 } else {
   // ── scaffold a local runner ───────────────────────────────────────────────
   const outFile = resolve(cwd, flags.out || "crewhaus-ui.ts");
@@ -113,9 +130,9 @@ if (cmd === "serve") {
 
   if (!flags.noInstall) await ensureDep(cwd);
 
-  process.stdout.write(`\n  Next:\n    bun ${basename(written)}\n  then open http://localhost:${flags.port ?? 4100}\n\n`);
+  process.stdout.write(`\n  Next:\n    bun ${basename(written)}\n  then open the link it prints\n\n`);
 
-  if (flags.serve) serve({ shape, harnessDir, port: flags.port });
+  if (flags.serve) serveOrDie({ shape, harnessDir, port: flags.port, host: flags.host });
 }
 
 // ── Ensure @crewhaus/ui is installed in the user's project ──────────────────

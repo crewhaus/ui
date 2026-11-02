@@ -403,7 +403,25 @@
     // stays hidden until features[] enables at least one.
     if (window.CH.panels) window.CH.panels.init(api, panelHost);
 
+    // The page opened without the printed link, or the UI restarted since it
+    // opened (a new key). Either way only the link from the terminal helps.
+    function showLinkNeeded(reason) {
+      setStatus(statusEl, "offline", "link needed");
+      window.CH.clear(main);
+      const stale = reason === "stale";
+      main.appendChild(
+        window.CH.dropzone({
+          icon: "link",
+          title: stale ? "Open the new link" : "Open the link from your terminal",
+          subtitle: stale
+            ? "The UI restarted since this page opened. Open the link it printed when it started again."
+            : "This UI opens from the link it printed when it started (the address ends in #k=…).",
+        }),
+      );
+    }
+
     spec.build(api);
+    conn.on("auth", (m) => showLinkNeeded(m && m.reason));
     conn.connect();
     return api;
   }

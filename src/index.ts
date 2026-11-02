@@ -8,8 +8,8 @@
  * polished, shape-aware UI for it. The scaffolding helpers back the
  * `crewhaus-ui` CLI (write a runner like the snippet above with one command).
  */
-export { serve } from "../_shared/host.ts";
-export type { ServeOptions } from "../_shared/host.ts";
+export { serve, ServeRefusedError } from "../_shared/host.ts";
+export type { ServeHandle, ServeOptions } from "../_shared/host.ts";
 export {
   PKG_ROOT,
   listShapes,

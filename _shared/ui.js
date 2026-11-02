@@ -14,6 +14,9 @@
      CH.mdInto(node, src)          -> clears node, appends md(src)
      CH.fmt*(...)                  -> formatting helpers (strings)
      CH.Connection()               -> WebSocket client { on, send, connect }
+                                      (emits "auth" {reason} when the key is
+                                      missing or from an earlier start)
+     CH.uiKey                      -> the per-start key from the printed link
      CH.Chat / Terminal / Composer / dropzone -> UI components
    ========================================================================== */
 (function () {
@@ -302,12 +305,104 @@
     return node;
   }
 
+  // ── The per-start key ─────────────────────────────────────────────────────
+  // The host prints a link ending in `#k=<key>`, with a new key each time it
+  // starts. The page keeps the key for this tab (session storage), takes it
+  // out of the address bar, and sends it with every request to its own host:
+  // a header on fetch, a subprotocol on the WebSocket. Never in a query
+  // string or a cookie, and never to another site.
+  const uiKey = (function () {
+    const HEADER = "x-crewhaus-ui-key";
+    const WS_PROTOCOL = "crewhaus-ui";
+    const WS_KEY_PREFIX = "crewhaus-ui.key.";
+    const STORAGE_KEY = "crewhaus-ui:key";
+    const HASH_RE = /^#k=([A-Za-z0-9_-]{32,256})$/;
+    // Used only when session storage cannot be read at all (blocked site
+    // data): the page then works until it reloads.
+    let held = null;
+
+    function fromHash(hash) {
+      const m = typeof hash === "string" ? HASH_RE.exec(hash) : null;
+      return m ? m[1] : null;
+    }
+    function get() {
+      try {
+        return sessionStorage.getItem(STORAGE_KEY);
+      } catch {
+        return held;
+      }
+    }
+    /** Take the key from the address bar, if it carries one. Returns whether
+     *  a key was stored. Safe to call more than once. */
+    function init() {
+      if (typeof location === "undefined") return false;
+      const key = fromHash(location.hash);
+      if (!key) return false;
+      held = key;
+      try {
+        sessionStorage.setItem(STORAGE_KEY, key);
+      } catch {
+        /* blocked: `held` covers this page */
+      }
+      try {
+        history.replaceState(null, "", location.pathname + location.search);
+      } catch {
+        /* the key stays in the address bar; it still works */
+      }
+      return true;
+    }
+    function wsProtocols(key) {
+      return [WS_PROTOCOL, WS_KEY_PREFIX + key];
+    }
+    function urlOf(input) {
+      if (typeof input === "string") return input;
+      if (input && typeof input.url === "string") return input.url; // a Request
+      return String(input); // a URL
+    }
+    function sameOrigin(input) {
+      try {
+        return new URL(urlOf(input), location.href).origin === location.origin;
+      } catch {
+        return false;
+      }
+    }
+    /** A fetch that adds the key to requests for this page's own host only. */
+    function wrapFetch(realFetch) {
+      return function (input, init) {
+        const key = get();
+        if (!key || !sameOrigin(input)) return realFetch(input, init);
+        const own = init && init.headers;
+        const fromRequest = input && typeof input === "object" && input.headers;
+        const headers = new Headers(own || fromRequest || undefined);
+        headers.set(HEADER, key);
+        return realFetch(input, Object.assign({}, init, { headers }));
+      };
+    }
+    return { HEADER, WS_PROTOCOL, WS_KEY_PREFIX, STORAGE_KEY, fromHash, get, init, wsProtocols, wrapFetch };
+  })();
+  uiKey.init();
+  // Pasting the link into a tab that already shows the page changes only the
+  // fragment, which does not reload it: reload once the new key is stored.
+  if (typeof addEventListener === "function") {
+    addEventListener("hashchange", () => {
+      if (uiKey.init()) location.reload();
+    });
+  }
+  // Every same-origin fetch on the page (views, shape apps) carries the key.
+  if (typeof location !== "undefined" && typeof window.fetch === "function") {
+    window.fetch = uiKey.wrapFetch(window.fetch.bind(window));
+  }
+
   // ── WebSocket client ──────────────────────────────────────────────────────
   function Connection() {
     const handlers = {};
     let ws = null;
     let retry = 0;
     const emit = (type, msg) => (handlers[type] || []).forEach((cb) => cb(msg));
+    const retryLater = () => {
+      retry++;
+      setTimeout(() => api.connect(), Math.min(retry * 500, 4000));
+    };
     const api = {
       on(type, cb) {
         (handlers[type] = handlers[type] || []).push(cb);
@@ -317,16 +412,33 @@
         if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj));
       },
       connect() {
+        const key = uiKey.get();
+        if (!key) {
+          // Opened without the printed link: nothing to connect with.
+          emit("auth", { reason: "missing" });
+          return api;
+        }
         const proto = location.protocol === "https:" ? "wss" : "ws";
-        ws = new WebSocket(`${proto}://${location.host}/ws`);
+        ws = new WebSocket(`${proto}://${location.host}/ws`, uiKey.wsProtocols(key));
         ws.onopen = () => {
           retry = 0;
           emit("open", {});
         };
         ws.onclose = () => {
           emit("close", {});
-          retry++;
-          setTimeout(() => api.connect(), Math.min(retry * 500, 4000));
+          // A 401 means this tab's key is from an earlier start: retrying
+          // cannot help, so say so and stop. Anything else is a restart or a
+          // network blip: back off and retry.
+          let probe;
+          try {
+            probe = fetch("/api/state", { cache: "no-store" });
+          } catch (e) {
+            probe = Promise.reject(e);
+          }
+          Promise.resolve(probe).then(
+            (r) => (r && r.status === 401 ? emit("auth", { reason: "stale" }) : retryLater()),
+            () => retryLater(),
+          );
         };
         ws.onmessage = (e) => {
           let msg;
@@ -842,6 +954,7 @@
     mdInto,
     inlineNodes,
     Connection,
+    uiKey,
     setStatus,
     toast,
     copy,

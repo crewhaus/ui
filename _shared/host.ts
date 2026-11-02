@@ -22,7 +22,7 @@
  */
 
 import { spawn } from "bun";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import {
   appendFileSync,
   chmodSync,
@@ -30,11 +30,12 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   statSync,
   watch,
   writeFileSync,
 } from "node:fs";
-import { dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 // -- Types --------------------------------------------------------------------
 
@@ -1626,13 +1627,7 @@ export class Supervisor {
     this.stop();
     this.setState("starting");
 
-    const env: Record<string, string> = {
-      ...loadEnvChain(harnessRoot),
-      ...process.env,
-      CREWHAUS_TRACE: "json",
-      CREWHAUS_COST_TRACKING: "1",
-      ...(this.config.env ?? {}),
-    };
+    const env = childEnv(loadEnvChain(harnessRoot), process.env, this.config);
 
     if (this.config.runClass === "daemon-http") {
       this.daemonPort = await freePort(this.config.port ?? 3000);
@@ -1771,12 +1766,14 @@ async function runWorker(
     ...(process.env as Record<string, string>),
     ...parseEnvFile(join(harnessDir, ".dev.vars")),
   };
+  // Keep the UI key out of the worker's env, whichever file or variable set it.
+  Reflect.deleteProperty(env, "CREWHAUS_UI_KEY");
   const url = new URL(req.url);
   const body =
     req.method === "GET" || req.method === "HEAD" ? undefined : await req.arrayBuffer();
   const forwarded = new Request(`http://worker.local/${pathAfter}${url.search}`, {
     method: req.method,
-    headers: req.headers,
+    headers: withoutKey(req.headers),
     body,
   });
   const ctx = { waitUntil() {}, passThroughOnException() {} };
@@ -1996,9 +1993,248 @@ export class MemoryWatcher {
   }
 }
 
-// -- Server -------------------------------------------------------------------
+// -- Access: where the host listens, and the key ------------------------------
+//
+// The UI drives a harness: it installs and starts it, sends it input, rewrites
+// its spec, writes its secrets and saves uploaded files. So the person who
+// starts the UI is the only one who can drive it:
+//   - it listens on 127.0.0.1 unless the operator picks another address AND a
+//     key of their own (`CREWHAUS_UI_KEY`);
+//   - every route except the page's own files needs the key, which is new on
+//     every start and printed as a link (`…/#k=<key>`);
+//   - the WebSocket accepts only its own page as `Origin`;
+//   - the host keeps the key out of the harness's and the worker's environment
+//     and out of the requests it forwards to them.
 
-const WS_CLIENTS = new Set<{ send: (s: string) => void }>();
+/** Where the host listens unless told otherwise: this computer only. */
+export const DEFAULT_HOST = "127.0.0.1";
+/** The header that carries the key on HTTP requests. */
+export const KEY_HEADER = "x-crewhaus-ui-key";
+/** The WebSocket subprotocol the page asks for, and the only one answered. */
+export const WS_PROTOCOL = "crewhaus-ui";
+/** A browser cannot set headers on a WebSocket, so the page offers the key as
+ *  a second subprotocol, `crewhaus-ui.key.<key>`. It is never echoed back. */
+export const WS_KEY_PROTOCOL_PREFIX = "crewhaus-ui.key.";
+/** The form a key the operator chooses must take (`openssl rand -hex 32` fits). */
+export const OPERATOR_KEY_RE = /^[A-Za-z0-9_-]{32,256}$/;
+
+const IPV4_OCTET = "(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)";
+const LOOPBACK_IPV4_RE = new RegExp(`^127\\.${IPV4_OCTET}\\.${IPV4_OCTET}\\.${IPV4_OCTET}$`);
+
+/**
+ * Whether `host` names this computer only: `localhost`, `::1` (bracketed or
+ * not) or an IPv4 address in 127.0.0.0/8. Everything else is false, on
+ * purpose: wildcards, private ranges, `*.local` names and IPv4-mapped forms.
+ */
+export function isLoopbackHost(host: string): boolean {
+  if (typeof host !== "string") return false;
+  const h = host.toLowerCase();
+  return h === "localhost" || h === "::1" || h === "[::1]" || LOOPBACK_IPV4_RE.test(h);
+}
+
+/** Why `serve()` would not start. It is thrown before anything listens. */
+export class ServeRefusedError extends Error {
+  readonly reason: "host-needs-key" | "bad-key";
+  constructor(reason: "host-needs-key" | "bad-key", message: string) {
+    super(message);
+    this.name = "ServeRefusedError";
+    this.reason = reason;
+  }
+}
+
+export type Access = {
+  /** The address the server binds. */
+  hostname: string;
+  /** Whether that address is this computer only. */
+  loopback: boolean;
+  /** The key every route but the page's own files requires. */
+  key: string;
+  /** "boot": new for this start. "operator": the key the operator chose. */
+  keySource: "boot" | "operator";
+};
+
+const KEY_FORM = "32 or more letters, digits, - or _";
+
+function hostNeedsKeyMessage(host: string): string {
+  return (
+    `Listening on ${host} would let other devices open this UI. It listens on this computer ` +
+    `only unless you set CREWHAUS_UI_KEY to a long random value (${KEY_FORM}). To use it ` +
+    "from another device without that, forward the port with an SSH tunnel, over Tailscale " +
+    "or any network."
+  );
+}
+
+const BAD_KEY_MESSAGE =
+  `The UI key (CREWHAUS_UI_KEY) must be a long random value: ${KEY_FORM}, up to 256, ` +
+  "for example from `openssl rand -hex 32`. Fix it, or unset it to get a new key each time " +
+  "the UI starts.";
+
+const setValue = (v: string | undefined): string | undefined =>
+  typeof v === "string" && v !== "" ? v : undefined;
+
+/**
+ * Decide where to listen and which key to require. Pure over `env`:
+ *   - host: `opts.host`, else `env.CREWHAUS_UI_HOST`, else 127.0.0.1;
+ *     `localhost` binds 127.0.0.1, and `[::1]` binds `::1`;
+ *   - key: `opts.key`, else `env.CREWHAUS_UI_KEY`, else a new random key.
+ * An empty value counts as unset. An address other than this computer needs a
+ * key the operator chose, and a chosen key that does not match
+ * {@link OPERATOR_KEY_RE} is refused even on loopback. Neither refusal ever
+ * repeats the key.
+ */
+export function resolveAccess(
+  opts: { host?: string; key?: string },
+  env: Record<string, string | undefined>,
+): Access {
+  const asked =
+    setValue(opts.host?.trim()) ?? setValue(env.CREWHAUS_UI_HOST?.trim()) ?? DEFAULT_HOST;
+  let hostname = asked.startsWith("[") && asked.endsWith("]") ? asked.slice(1, -1) : asked;
+  if (hostname.toLowerCase() === "localhost") hostname = DEFAULT_HOST;
+  const loopback = isLoopbackHost(hostname);
+  const chosen = setValue(opts.key) ?? setValue(env.CREWHAUS_UI_KEY);
+  if (chosen !== undefined && !OPERATOR_KEY_RE.test(chosen)) {
+    throw new ServeRefusedError("bad-key", BAD_KEY_MESSAGE);
+  }
+  if (chosen !== undefined) return { hostname, loopback, key: chosen, keySource: "operator" };
+  if (!loopback) throw new ServeRefusedError("host-needs-key", hostNeedsKeyMessage(hostname));
+  return { hostname, loopback, key: randomBytes(32).toString("base64url"), keySource: "boot" };
+}
+
+const sha256 = (s: string): Buffer => createHash("sha256").update(s, "utf8").digest();
+
+/** Constant-time key check. Both sides are hashed first, so the comparison
+ *  does not depend on length and a short or empty value is simply false. */
+export function keyMatches(presented: string | null | undefined, key: string): boolean {
+  if (typeof presented !== "string" || presented === "") return false;
+  if (typeof key !== "string" || key === "") return false;
+  return timingSafeEqual(sha256(presented), sha256(key));
+}
+
+/** The subprotocols a request offers, trimmed; empty when it offers none. */
+function offeredProtocols(req: Request): string[] {
+  const raw = req.headers.get("sec-websocket-protocol");
+  if (!raw) return [];
+  return raw
+    .split(",")
+    .map((p) => p.trim())
+    .filter(Boolean);
+}
+
+/**
+ * The key a request presents: the `x-crewhaus-ui-key` header, or, on the
+ * `/ws` route only (`viaProtocol`), a `crewhaus-ui.key.<key>` subprotocol.
+ * A query parameter or a cookie is never read.
+ */
+export function presentedKey(req: Request, viaProtocol: boolean): string | null {
+  const header = req.headers.get(KEY_HEADER);
+  if (header) return header;
+  if (!viaProtocol) return null;
+  for (const p of offeredProtocols(req)) {
+    if (p.startsWith(WS_KEY_PROTOCOL_PREFIX)) return p.slice(WS_KEY_PROTOCOL_PREFIX.length);
+  }
+  return null;
+}
+
+/**
+ * Whether a WebSocket request comes from this UI's own page. No `Origin` at
+ * all (a script, not a browser) passes this check; the key is still required.
+ * A browser's `Origin` must name the host and port the request was sent to.
+ * While the UI listens on this computer only, that name must also be a
+ * loopback one, so a page whose own name merely resolves here is refused.
+ */
+export function wsOriginAllowed(
+  origin: string | null,
+  hostHeader: string | null,
+  loopback: boolean,
+): boolean {
+  if (origin === null) return true;
+  if (origin === "null") return false;
+  let u: URL;
+  try {
+    u = new URL(origin);
+  } catch {
+    return false;
+  }
+  if (u.protocol !== "http:" && u.protocol !== "https:") return false;
+  if (!hostHeader || u.host.toLowerCase() !== hostHeader.toLowerCase()) return false;
+  return !loopback || isLoopbackHost(u.hostname);
+}
+
+const PUBLIC_ASSET_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*\.(?:html|js|mjs|css|svg|png|ico|woff2)$/;
+
+/**
+ * Whether `name` may be served without the key: a single path segment naming
+ * one of the page's own asset types. Never a dotfile, `.json`, `.ts`, `.md` or
+ * anything with a slash.
+ */
+export function isPublicAssetName(name: string): boolean {
+  return (
+    typeof name === "string" &&
+    !name.includes("/") &&
+    !name.includes("\\") &&
+    PUBLIC_ASSET_RE.test(name)
+  );
+}
+
+/** Serve `name` from inside `dir`, symlinks resolved. Anything that resolves
+ *  outside `dir`, is not a regular file, or is missing answers 404. */
+function assetResponse(dir: string, name: string): Response {
+  try {
+    const rootReal = realpathSync(dir);
+    const fileReal = realpathSync(join(dir, name));
+    const rel = relative(rootReal, fileReal);
+    if (rel !== "" && !rel.startsWith("..") && !isAbsolute(rel) && statSync(fileReal).isFile()) {
+      return new Response(Bun.file(fileReal), { headers: { "content-type": mimeFor(fileReal) } });
+    }
+  } catch {
+    /* missing, or a link that leads nowhere */
+  }
+  return new Response("not found", { status: 404 });
+}
+
+/** A copy of `headers` without the key, for anything forwarded to the harness. */
+export function withoutKey(headers: Headers): Headers {
+  const out = new Headers(headers);
+  out.delete(KEY_HEADER);
+  return out;
+}
+
+/**
+ * The environment a harness child starts with: the `.env` chain < the host's
+ * environment < the trace switches < the shape's `env`, then without the UI
+ * key. A daemon shape is started with `HOST=127.0.0.1` unless `HOST` is set:
+ * under the UI its port exists to be proxied.
+ */
+export function childEnv(
+  chain: Record<string, string>,
+  proc: Record<string, string | undefined>,
+  config: ShapeConfig,
+): Record<string, string> {
+  const merged: Record<string, string | undefined> = {
+    ...chain,
+    ...proc,
+    CREWHAUS_TRACE: "json",
+    CREWHAUS_COST_TRACKING: "1",
+    ...(config.env ?? {}),
+  };
+  const env: Record<string, string> = {};
+  for (const [k, v] of Object.entries(merged)) if (typeof v === "string") env[k] = v;
+  Reflect.deleteProperty(env, "CREWHAUS_UI_KEY");
+  if (config.runClass === "daemon-http" && !env.HOST) env.HOST = DEFAULT_HOST;
+  return env;
+}
+
+const NEEDS_LINK = "Open the link the UI printed when it started.";
+const OTHER_PAGE = "This UI accepts connections only from its own page.";
+
+function plainText(status: number, body: string): Response {
+  return new Response(body, {
+    status,
+    headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" },
+  });
+}
+
+// -- Server -------------------------------------------------------------------
 
 /** Package root = the dir that holds `_shared/` and every `<shape>/`. */
 const PKG_ROOT = dirname(SHARED_DIR);
@@ -2014,6 +2250,33 @@ export type ServeOptions = {
   sharedDir?: string;
   /** Listen port. Default: `CREWHAUS_UI_PORT` env, else 4100. */
   port?: number;
+  /**
+   * Listen address. Default: `CREWHAUS_UI_HOST` env, else `127.0.0.1` (this
+   * computer only). Any other address needs `key`.
+   */
+  host?: string;
+  /**
+   * A key you chose ({@link OPERATOR_KEY_RE}; `openssl rand -hex 32` fits).
+   * Default: `CREWHAUS_UI_KEY` env, else a new random key on every start.
+   * `serve()` reads `CREWHAUS_UI_KEY` once and removes it from `process.env`,
+   * and keeps the key out of the harness's and the worker's environment and
+   * out of the requests it forwards to them. Set the key in your shell, not in
+   * the harness's `.env`, which the harness itself can read.
+   */
+  key?: string;
+};
+
+/** What `serve()` returns. */
+export type ServeHandle = {
+  /** The address the server listens on. */
+  hostname: string;
+  /** The port it listens on (the real one when `port: 0` asked for any). */
+  port: number;
+  /** The link the start banner prints. It carries the key: treat it as a
+   *  credential, like a password. */
+  link: string;
+  /** Stop the memory watcher, the harness child and the server. */
+  stop(): Promise<void>;
 };
 
 function resolveServe(opts: string | ServeOptions): {
@@ -2021,6 +2284,8 @@ function resolveServe(opts: string | ServeOptions): {
   harnessDir: string;
   sharedDir: string;
   port: number;
+  host?: string;
+  key?: string;
 } {
   const envPort = Number(process.env.CREWHAUS_UI_PORT ?? 0) || 4100;
   // Legacy / in-repo form: serve("<shapeDir>") with harness/ inside it.
@@ -2040,6 +2305,8 @@ function resolveServe(opts: string | ServeOptions): {
     harnessDir: resolve(opts.harnessDir ?? process.cwd()),
     sharedDir: opts.sharedDir ?? SHARED_DIR,
     port: opts.port ?? envPort,
+    host: opts.host,
+    key: opts.key,
   };
 }
 
@@ -2047,14 +2314,25 @@ function resolveServe(opts: string | ServeOptions): {
  * Serve a shape UI. Two forms:
  *   serve("/abs/path/to/ui/cli")                    // in-repo (harness/ inside)
  *   serve({ shape: "cli", harnessDir: "./build" })  // npm-package consumers
+ *
+ * It listens on 127.0.0.1 unless `host` (or `CREWHAUS_UI_HOST`) and a key you
+ * chose say otherwise, prints a link that carries the key, and returns a
+ * handle. It throws {@link ServeRefusedError} before anything starts when the
+ * address or the key is refused.
  */
-export function serve(opts: string | ServeOptions): void {
-  const { uiDir, harnessDir, sharedDir, port } = resolveServe(opts);
+export function serve(opts: string | ServeOptions): ServeHandle {
+  const { uiDir, harnessDir, sharedDir, port, host, key } = resolveServe(opts);
+  const access = resolveAccess({ host, key }, process.env);
   const config = readConfig(uiDir);
+  // Read once, then removed: the harness's and the worker's environments are
+  // built from process.env.
+  Reflect.deleteProperty(process.env, "CREWHAUS_UI_KEY");
 
+  // One client set per server: two servers in a process never share frames.
+  const clients = new Set<{ send: (s: string) => void }>();
   const broadcast: Broadcast = (msg) => {
     const s = JSON.stringify(msg);
-    for (const c of WS_CLIENTS) {
+    for (const c of clients) {
       try {
         c.send(s);
       } catch {
@@ -2077,16 +2355,48 @@ export function serve(opts: string | ServeOptions): void {
   };
 
   const server = Bun.serve({
+    hostname: access.hostname,
     port,
     idleTimeout: 0,
     async fetch(req, srv) {
       const url = new URL(req.url);
-      const path = decodeURIComponent(url.pathname);
+      let path: string;
+      try {
+        path = decodeURIComponent(url.pathname);
+      } catch {
+        return plainText(400, "Bad request.");
+      }
 
+      // Public: only the page's own files, each read inside its directory.
+      if (path === "/") return assetResponse(uiDir, "index.html");
+      if (path.startsWith("/_shared/")) {
+        const name = path.slice("/_shared/".length);
+        if (isPublicAssetName(name)) return assetResponse(sharedDir, name);
+      }
+      if (isPublicAssetName(path.slice(1))) return assetResponse(uiDir, path.slice(1));
+
+      // The socket: its own page only, then the key, then the upgrade.
       if (path === "/ws") {
-        if (srv.upgrade(req)) return undefined as unknown as Response;
+        if (!wsOriginAllowed(req.headers.get("origin"), req.headers.get("host"), access.loopback)) {
+          return plainText(403, OTHER_PAGE);
+        }
+        if (!keyMatches(presentedKey(req, true), access.key)) return plainText(401, NEEDS_LINK);
+        // Answer with `crewhaus-ui` or with no protocol, never with the key.
+        // Bun's default upgrade echoes the first protocol offered, which could
+        // be the key, so an offer without `crewhaus-ui` is not upgraded.
+        const offered = offeredProtocols(req);
+        const upgraded =
+          offered.length === 0
+            ? srv.upgrade(req)
+            : offered.includes(WS_PROTOCOL) &&
+              srv.upgrade(req, { headers: { "Sec-WebSocket-Protocol": WS_PROTOCOL } });
+        if (upgraded) return undefined as unknown as Response;
         return new Response("websocket upgrade failed", { status: 400 });
       }
+
+      // Everything else needs the key. The check runs before any route, so a
+      // route added later is keyed too.
+      if (!keyMatches(presentedKey(req, false), access.key)) return plainText(401, NEEDS_LINK);
 
       if (path === "/api/state") return Response.json({ config, ...sup.snapshot() });
       if (path === "/api/config") return Response.json(config);
@@ -2095,11 +2405,11 @@ export function serve(opts: string | ServeOptions): void {
       // Reverse-proxy to the daemon (daemon-http shapes).
       if (path.startsWith("/proxy/")) {
         if (!sup.daemonPort) return new Response("daemon not running", { status: 503 });
-        const target = `http://localhost:${sup.daemonPort}/${path.slice("/proxy/".length)}${url.search}`;
+        const target = `http://127.0.0.1:${sup.daemonPort}/${path.slice("/proxy/".length)}${url.search}`;
         try {
           const resp = await fetch(target, {
             method: req.method,
-            headers: req.headers,
+            headers: withoutKey(req.headers),
             body: req.method === "GET" || req.method === "HEAD" ? undefined : req.body,
             // @ts-expect-error Bun streaming bodies need duplex
             duplex: "half",
@@ -2135,24 +2445,11 @@ export function serve(opts: string | ServeOptions): void {
         return new Response("not found", { status: 404 });
       }
 
-      // Static: shape assets, then shared assets.
-      if (path === "/" || path === "/index.html") {
-        const r = staticFile(join(uiDir, "index.html"));
-        if (r) return r;
-      }
-      if (path.startsWith("/_shared/")) {
-        const r = staticFile(join(sharedDir, path.slice("/_shared/".length)));
-        if (r) return r;
-      }
-      {
-        const r = staticFile(join(uiDir, path.replace(/^\//, "")));
-        if (r) return r;
-      }
       return new Response("not found", { status: 404 });
     },
     websocket: {
       open(ws) {
-        WS_CLIENTS.add(ws);
+        clients.add(ws);
         ws.send(JSON.stringify({ type: "state", config, ...sup.snapshot() }));
         // Replay this run's buffered trace events so a reload / settings-restart
         // rebuilds the feed + stats instead of blanking. Marked `replay:true`
@@ -2162,7 +2459,7 @@ export function serve(opts: string | ServeOptions): void {
         }
       },
       close(ws) {
-        WS_CLIENTS.delete(ws);
+        clients.delete(ws);
       },
       async message(_ws, raw) {
         try {
@@ -2174,11 +2471,37 @@ export function serve(opts: string | ServeOptions): void {
     },
   });
 
+  // The link is the only place the key is ever printed.
+  const boundPort = server.port ?? port;
+  const wildcard = access.hostname === "0.0.0.0" || access.hostname === "::";
+  const linkHost = wildcard
+    ? DEFAULT_HOST
+    : access.hostname.includes(":")
+      ? `[${access.hostname}]`
+      : access.hostname;
+  const link = `http://${linkHost}:${boundPort}/#k=${access.key}`;
+  const reach = access.loopback
+    ? "it works on this computer only"
+    : wildcard
+      ? "any device that can reach this computer can use the key"
+      : `any device that can reach ${access.hostname} can use it`;
   const ready =
     `\n  CrewHaus | ${config.title} UI\n` +
-    `  > http://localhost:${server.port}\n` +
+    `  > ${link}   open this link to sign in (${reach})\n` +
+    (wildcard ? "  > it listens on every network address of this computer\n" : "") +
     `  > harness: ${harnessDir}\n`;
   process.stdout.write(ready);
+
+  return {
+    hostname: access.hostname,
+    port: boundPort,
+    link,
+    async stop() {
+      memoryWatcher.stop();
+      sup.stop();
+      await server.stop(true);
+    },
+  };
 }
 
 // Allow `bun host.ts <shapeDir>` for ad-hoc use.
