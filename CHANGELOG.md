@@ -58,12 +58,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **The managed dashboard's Request console has a signing secret to mint from,
-  whichever way the daemon was compiled.** When no `CREWHAUS_GATEWAY_JWT_SECRET`
-  is set, the host generates one for the daemon when you click Start, keeps it
-  until the host stops, and hands it to the UI's own page over its keyed socket.
-  A secret you set stays yours: paste it in the Auth panel.
-
 - The workflow shape's between-runs reset cleared its stats field by field and
   missed `cacheTokens` and `unpriced` (and would have missed the new spend
   maps), so those carried over into the next run. It now assigns a fresh
@@ -75,6 +69,12 @@ The first cut since 0.1.3 (2026-07-01). Everything from the 0.3.0 UI refresh
 (#10) plus two host fixes that were only ever available from a git checkout.
 
 ### Fixed
+
+- **The managed dashboard's Request console has a signing secret to mint from,
+  whichever way the daemon was compiled.** When no `CREWHAUS_GATEWAY_JWT_SECRET`
+  is set, the host generates one for the daemon when you click Start, keeps it
+  until the host stops, and hands it to the UI's own page over its keyed socket.
+  A secret you set stays yours: paste it in the Auth panel.
 
 - **Ten of the eighteen shapes could not start with `crewhaus` on PATH.** The
   host's launch selector offered the interpreter path (`crewhaus run <spec>`)
