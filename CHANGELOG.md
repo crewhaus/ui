@@ -58,6 +58,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The managed dashboard's Request console has a signing secret to mint from,
+  whichever way the daemon was compiled.** When no `CREWHAUS_GATEWAY_JWT_SECRET`
+  is set, the host generates one for the daemon when you click Start, keeps it
+  until the host stops, and hands it to the UI's own page over its keyed socket.
+  A secret you set stays yours: paste it in the Auth panel.
+
 - The workflow shape's between-runs reset cleared its stats field by field and
   missed `cacheTokens` and `unpriced` (and would have missed the new spend
   maps), so those carried over into the next run. It now assigns a fresh

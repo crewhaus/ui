@@ -1031,6 +1031,13 @@ export class Supervisor {
    *  edits, keep using it so subsequent restarts resume the same session. */
   private liveEdit = false;
   daemonPort: number | null = null;
+  /**
+   * The signing secret this host generated for a managed daemon with none set.
+   * Kept for the host's lifetime, so a token stays valid across a Restart.
+   */
+  private generatedGatewaySecret: string | null = null;
+  /** What this UI's own page mints tenant tokens from: null when the operator set the secret. */
+  private dashboardGatewaySecret: string | null = null;
 
   constructor(
     readonly harnessDir: string,
@@ -1062,6 +1069,16 @@ export class Supervisor {
       if (derived) this.specName = derived;
     }
     return { sessionId: this.sessionId, specName: this.specName ?? null };
+  }
+
+  /**
+   * The message that gives this UI's page its signing secret, or null on any
+   * shape but `managed`. It travels on the keyed socket only: `snapshot()` also
+   * answers `/api/state`, so it stays out of there.
+   */
+  gatewaySecretMessage(): { type: "gateway_secret"; secret: string | null } | null {
+    if (this.config.shape !== "managed") return null;
+    return { type: "gateway_secret", secret: this.dashboardGatewaySecret };
   }
 
   /** This run's buffered trace events, for replay to a late WS subscriber. */
@@ -1634,6 +1651,16 @@ export class Supervisor {
       env.PORT = String(this.daemonPort);
     }
 
+    if (this.config.shape === "managed") {
+      if (env.CREWHAUS_GATEWAY_JWT_SECRET === undefined) {
+        this.generatedGatewaySecret ??= randomBytes(24).toString("hex");
+        env.CREWHAUS_GATEWAY_JWT_SECRET = this.generatedGatewaySecret;
+        this.dashboardGatewaySecret = this.generatedGatewaySecret;
+      } else {
+        this.dashboardGatewaySecret = null;
+      }
+    }
+
     const resuming = plan.mode === "interpreter" && !!(opts && opts.resume);
     this.log(
       `launch: ${plan.mode}${resuming ? " (resume)" : ""} — ${plan.argv.join(" ")}\n  cwd: ${harnessRoot}`,
@@ -1654,6 +1681,8 @@ export class Supervisor {
     this.eventRing = [];
     this.setState("running");
     this.broadcast({ type: "state", ...this.snapshot() });
+    const secretMessage = this.gatewaySecretMessage();
+    if (secretMessage !== null) this.broadcast(secretMessage);
 
     const pipesDone = Promise.allSettled([
       this.pumpStdout(proc.stdout),
@@ -2451,6 +2480,8 @@ export function serve(opts: string | ServeOptions): ServeHandle {
       open(ws) {
         clients.add(ws);
         ws.send(JSON.stringify({ type: "state", config, ...sup.snapshot() }));
+        const secretMessage = sup.gatewaySecretMessage();
+        if (secretMessage !== null) ws.send(JSON.stringify(secretMessage));
         // Replay this run's buffered trace events so a reload / settings-restart
         // rebuilds the feed + stats instead of blanking. Marked `replay:true`
         // (frontends accrue/render them exactly like live events).
