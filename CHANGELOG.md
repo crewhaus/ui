@@ -70,6 +70,12 @@ The first cut since 0.1.3 (2026-07-01). Everything from the 0.3.0 UI refresh
 
 ### Fixed
 
+- **The managed dashboard's Request console has a signing secret to mint from,
+  whichever way the daemon was compiled.** When no `CREWHAUS_GATEWAY_JWT_SECRET`
+  is set, the host generates one for the daemon when you click Start, keeps it
+  until the host stops, and hands it to the UI's own page over its keyed socket.
+  A secret you set stays yours: paste it in the Auth panel.
+
 - **Ten of the eighteen shapes could not start with `crewhaus` on PATH.** The
   host's launch selector offered the interpreter path (`crewhaus run <spec>`)
   whenever a spec and a resolvable `crewhaus` binary were present, gated only

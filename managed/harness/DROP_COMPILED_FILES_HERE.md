@@ -32,22 +32,20 @@ npm) install automatically on first boot.
 ## Auth note
 
 The gateway verifies **HS256 JWT bearer tokens** (claim `tenant_id`). It never
-mints them. On boot with no `CREWHAUS_GATEWAY_JWT_SECRET` set, the daemon
-auto-generates a one-shot dev secret and prints it to its log:
+mints them. When you click **Start** with no `CREWHAUS_GATEWAY_JWT_SECRET` set,
+this host generates one for the daemon and hands it to this dashboard, which
+mints short-lived tenant tokens in the browser, so the **Request console** works
+out of the box. The generated secret lasts until the host stops.
 
-```
-[managed] no CREWHAUS_GATEWAY_JWT_SECRET in env — generated a one-shot dev secret. Export it to re-use:
-  export CREWHAUS_GATEWAY_JWT_SECRET=<hex>
-```
-
-This dashboard reads that line automatically and mints short-lived tenant tokens
-in the browser so the **Request console** works out of the box. To pin the
-secret across restarts (so previously-minted tokens keep working), export it
-before running:
+To keep tokens valid across host restarts, set your own before running, and
+paste it in the **Auth** panel:
 
 ```sh
 export CREWHAUS_GATEWAY_JWT_SECRET=<a-secret-at-least-16-chars>
 ```
+
+A daemon you run yourself, outside this host, with no secret set saves the one
+it generates to `.crewhaus/run/gateway-jwt-secret`.
 
 ---
 

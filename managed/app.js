@@ -10,10 +10,10 @@
    claim. Methods (from @crewhaus/gateway-protocol): runs.create, runs.continue,
    runs.cancel, audit.tail, sessions.list.
 
-   The daemon never mints tokens. On boot with no CREWHAUS_GATEWAY_JWT_SECRET it
-   auto-generates a one-shot dev secret and logs it; this dashboard reads that
-   line, mints short-lived tenant tokens in the browser (crypto.subtle HMAC), and
-   drives the gateway end-to-end. Operators can also paste a secret/token. */
+   The daemon never mints tokens. When no CREWHAUS_GATEWAY_JWT_SECRET is set, the
+   host generates one for the daemon and hands it to this page, which mints
+   short-lived tenant tokens in the browser (crypto.subtle HMAC) and drives the
+   gateway end-to-end. Operators can also paste a secret/token. */
 (function () {
   "use strict";
   const { el, icon, md, mdInto, clear, events, fmtTokens, toast, copy } = window.CH;
@@ -97,7 +97,8 @@
     build(api) {
       // ── Shared state ────────────────────────────────────────────────────
       let mode = null;
-      let jwtSecret = null; // discovered dev secret OR operator-pasted
+      let jwtSecret = null; // the host's generated secret OR operator-pasted
+      let hostSecret = null; // the last secret the host handed over
       let pastedToken = null; // operator-supplied full token (overrides minting)
       let tenants = ["tenant-a"]; // operator-managed tenant list
       let lastSessionId = null; // surfaced from a runs.create reply
@@ -113,9 +114,17 @@
       // ── WS handlers (attached once) ─────────────────────────────────────
       api.on("event", (m) => pushEvent(m.event));
 
-      // The daemon prints its auto-generated dev secret to stderr; capture it.
-      api.on("stderr", (m) => harvestSecret(m.line));
-      api.on("log", (m) => harvestSecret(m.line));
+      // The host's generated secret. A secret the operator pasted stays.
+      api.on("gateway_secret", (m) => {
+        const next = m.secret || null;
+        const changed = next !== hostSecret;
+        if (jwtSecret === hostSecret) jwtSecret = next;
+        hostSecret = next;
+        if (ui && changed) {
+          refreshAuthState();
+          if (next && jwtSecret === next) toast("Signing secret ready — tokens are minted for you");
+        }
+      });
 
       api.on("status", (m) => {
         if (m.state === "running") {
@@ -126,19 +135,6 @@
         }
         refreshConsoleEnabled();
       });
-
-      function harvestSecret(line) {
-        if (!line || jwtSecret) return;
-        // Matches: "export CREWHAUS_GATEWAY_JWT_SECRET=<hex>"
-        const m = String(line).match(/CREWHAUS_GATEWAY_JWT_SECRET=([0-9a-fA-F]{16,})/);
-        if (m) {
-          jwtSecret = m[1];
-          if (ui) {
-            refreshAuthState();
-            toast("Dev JWT secret captured from daemon log");
-          }
-        }
-      }
 
       function pushEvent(ev) {
         events.accrue(ev, stats);
@@ -445,8 +441,8 @@
             infoCard(
               "shield",
               "No token available",
-              "The gateway is up but rejected the request — no JWT secret has been captured yet. " +
-                "Either set CREWHAUS_GATEWAY_JWT_SECRET before Start, or paste a token/secret in the Auth panel.",
+              "The gateway is up but rejected the request, and this page has no signing secret. " +
+                "Paste a token or the secret you set as CREWHAUS_GATEWAY_JWT_SECRET in the Auth panel.",
             ),
           );
         }
@@ -657,7 +653,7 @@
         const tokenInput = el("input", {
           class: "field",
           type: "text",
-          placeholder: "Paste a JWT, or the dev secret hex…",
+          placeholder: "Paste a JWT, or the signing secret…",
           style: { fontFamily: "var(--mono)", fontSize: "11.5px" },
         });
         ui.tokenInput = tokenInput;
@@ -667,7 +663,7 @@
           const v = tokenInput.value.trim();
           if (!v) {
             pastedToken = null;
-            // leave any harvested jwtSecret in place
+            // leave any secret from the host in place
             refreshAuthState();
             return;
           }
@@ -704,7 +700,7 @@
               [
                 "HS256 bearer tokens with a ",
                 el("code", { text: "tenant_id" }),
-                " claim. The daemon's dev secret is captured from its log automatically; otherwise paste a token or secret.",
+                " claim. With no secret set, the host generates one and tokens are minted for you; otherwise paste a token or secret.",
               ],
             ),
             el("div", { class: "row", style: { gap: "8px" } }, [tokenInput, applyBtn, clearBtn]),
@@ -720,7 +716,7 @@
           label = "token pasted";
           cls = "badge ok";
         } else if (jwtSecret) {
-          label = "minting · dev secret";
+          label = jwtSecret === hostSecret ? "minting · generated secret" : "minting · pasted secret";
           cls = "badge ok";
         }
         ui.authState.textContent = label;

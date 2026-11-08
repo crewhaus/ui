@@ -4,8 +4,8 @@
  * tail — to the `state:"exited"` status message so frontends can explain
  * a crash even when the process died before emitting anything structured.
  */
-import { afterAll, describe, expect, test } from "bun:test";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   crewhausResponse,
@@ -453,5 +453,123 @@ describe("MemoryWatcher", () => {
     w.stop();
 
     expect(seen.filter((m) => m.type === "memory")).toEqual([]);
+  });
+});
+
+// ── A managed daemon's signing secret ───────────────────────────────────────
+
+const MANAGED_CONFIG = {
+  shape: "managed",
+  title: "test",
+  tagline: "",
+  runClass: "daemon-http",
+  entry: ["agent.ts"],
+  input: "none",
+  port: 3000,
+} as const;
+
+/** A fake daemon that records the secret it was started with, then exits. */
+const RECORD_SECRET = `
+  await Bun.write("seen-secret.txt", process.env.CREWHAUS_GATEWAY_JWT_SECRET ?? "<unset>");
+`;
+
+type SecretMessage = { type: "gateway_secret"; secret: string | null };
+
+/** Run the fake daemon once on `sup`, and wait for it to exit. */
+async function startAndExit(sup: Supervisor, exited: () => Promise<void>): Promise<void> {
+  const done = exited();
+  await sup.start();
+  await done;
+}
+
+function managedSupervisor(name: string, config: Record<string, unknown> = MANAGED_CONFIG) {
+  const dir = makeHarness(name, RECORD_SECRET);
+  const messages: Record<string, unknown>[] = [];
+  let onExited: (() => void) | null = null;
+  const sup = new Supervisor(dir, config as never, (msg) => {
+    const m = msg as Record<string, unknown>;
+    messages.push(m);
+    if (m.type === "status" && m.state === "exited") onExited?.();
+  });
+  const exited = () =>
+    new Promise<void>((res) => {
+      onExited = res;
+    });
+  const seen = () => readFileSync(join(dir, "seen-secret.txt"), "utf8");
+  const secrets = () =>
+    messages.filter((m) => m.type === "gateway_secret") as unknown as SecretMessage[];
+  return { dir, sup, messages, exited, seen, secrets };
+}
+
+describe("a managed daemon's signing secret", () => {
+  const saved = process.env.CREWHAUS_GATEWAY_JWT_SECRET;
+  beforeEach(() => {
+    Reflect.deleteProperty(process.env, "CREWHAUS_GATEWAY_JWT_SECRET");
+  });
+  afterEach(() => {
+    if (saved === undefined) Reflect.deleteProperty(process.env, "CREWHAUS_GATEWAY_JWT_SECRET");
+    else process.env.CREWHAUS_GATEWAY_JWT_SECRET = saved;
+  });
+
+  test("with none set: the daemon starts with a generated one and the page is handed the same value", async () => {
+    const h = managedSupervisor("secret-generated");
+    await startAndExit(h.sup, h.exited);
+    const given = h.seen();
+    expect(given).toMatch(/^[0-9a-f]{48}$/);
+    expect(h.secrets()).toEqual([{ type: "gateway_secret", secret: given }]);
+    expect(h.sup.gatewaySecretMessage()).toEqual({ type: "gateway_secret", secret: given });
+  });
+
+  test("a restart keeps the value, so a token stays valid", async () => {
+    const h = managedSupervisor("secret-restart");
+    await startAndExit(h.sup, h.exited);
+    const first = h.seen();
+    await startAndExit(h.sup, h.exited);
+    expect(h.seen()).toBe(first);
+  });
+
+  test("the value stays out of the snapshot /api/state answers", async () => {
+    const h = managedSupervisor("secret-snapshot");
+    await startAndExit(h.sup, h.exited);
+    expect(JSON.stringify(h.sup.snapshot())).not.toContain(h.seen());
+    const notSecretMessages = h.messages.filter((m) => m.type !== "gateway_secret");
+    expect(JSON.stringify(notSecretMessages)).not.toContain(h.seen());
+  });
+
+  test("set by the operator in the environment: used as it is, and not handed to the page", async () => {
+    const operator = ["operator", "secret", "0".repeat(16)].join("-");
+    process.env.CREWHAUS_GATEWAY_JWT_SECRET = operator;
+    const h = managedSupervisor("secret-operator");
+    await startAndExit(h.sup, h.exited);
+    expect(h.seen()).toBe(operator);
+    expect(h.secrets()).toEqual([{ type: "gateway_secret", secret: null }]);
+  });
+
+  test("set by the operator in the harness .env: used as it is, and not handed to the page", async () => {
+    const operator = ["dotenv", "secret", "0".repeat(16)].join("-");
+    const h = managedSupervisor("secret-dotenv");
+    writeFileSync(join(h.dir, ".env"), `CREWHAUS_GATEWAY_JWT_SECRET=${operator}\n`);
+    await startAndExit(h.sup, h.exited);
+    expect(h.seen()).toBe(operator);
+    expect(h.secrets()).toEqual([{ type: "gateway_secret", secret: null }]);
+  });
+
+  test("the operator setting one replaces what the page was handed", async () => {
+    const operator = ["later", "secret", "0".repeat(16)].join("-");
+    const h = managedSupervisor("secret-later");
+    await startAndExit(h.sup, h.exited);
+    expect(h.secrets().at(-1)?.secret).toBe(h.seen());
+    writeFileSync(join(h.dir, ".env"), `CREWHAUS_GATEWAY_JWT_SECRET=${operator}\n`);
+    await startAndExit(h.sup, h.exited);
+    expect(h.seen()).toBe(operator);
+    expect(h.secrets().at(-1)?.secret).toBeNull();
+  });
+
+  test("another daemon shape gets no secret and no message", async () => {
+    const h = managedSupervisor("secret-other-shape", { ...MANAGED_CONFIG, shape: "channel" });
+    await startAndExit(h.sup, h.exited);
+    expect(h.seen()).toBe("<unset>");
+    expect(h.secrets()).toEqual([]);
+    expect(h.sup.gatewaySecretMessage()).toBeNull();
   });
 });
