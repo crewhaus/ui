@@ -8,12 +8,16 @@
  * for the v0.3.0 routing/cache kinds that previously fell to a generic dot card.
  */
 import { beforeAll, describe, expect, test } from "bun:test";
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 
 type Opts = Record<string, unknown>;
 type EventsModule = {
   R: Record<string, (e: Record<string, unknown>) => Opts>;
   render: (e: Record<string, unknown>) => unknown;
   FEED_SKIP: Set<string>;
+  idLabel: (id: unknown, max?: number) => string;
+  idFileStem: (id: unknown, fallback: string) => string;
 };
 
 let events: EventsModule;
@@ -666,5 +670,134 @@ describe("v0.6.0 spend by role and by profile", () => {
     const second = newStats();
     expect(spendByRole(first)).toHaveLength(1);
     expect(spendByRole(second)).toEqual([]);
+  });
+});
+
+// ── Ids are opaque ───────────────────────────────────────────────────────────
+// A run id can be any string. Ids are built here at runtime in the canonical
+// `run_` + 26 lowercase Crockford base32 form (10 time + 16 random characters).
+
+const CROCKFORD = "0123456789abcdefghjkmnpqrstvwxyz";
+const CANON_RE = /^run_[0-9a-hjkmnp-tv-z]{26}$/;
+const crock = (n: number, seed: number) =>
+  Array.from({ length: n }, (_, i) => CROCKFORD[(seed * 7 + i * 13) % 32]).join("");
+const canon = (time: string, rand: string) => `run_${time}${rand}`;
+const REPO = join(import.meta.dir, "..");
+
+describe("ids are opaque: idLabel", () => {
+  const t = crock(10, 3);
+  const r15 = crock(15, 5);
+
+  test("canon() builds the canonical form", () => {
+    expect(canon(t, r15 + "a")).toMatch(CANON_RE);
+    expect(canon(crock(10, 1), crock(16, 9))).toMatch(CANON_RE);
+    expect(canon(t, r15 + "u")).not.toMatch(CANON_RE); // u is not Crockford
+  });
+
+  test("an id at or under max comes back unchanged", () => {
+    expect(events.idLabel("run_x")).toBe("run_x");
+    expect(events.idLabel("run_0a1b2c3d")).toBe("run_0a1b2c3d");
+    expect(events.idLabel("abcdefgh", 8)).toBe("abcdefgh");
+  });
+
+  test("two ids minted in the same second keep different labels, both ends kept", () => {
+    const a = canon(t, r15 + "a");
+    const b = canon(t, r15 + "b");
+    expect(a.slice(0, 14)).toBe(b.slice(0, 14));
+    const la = events.idLabel(a);
+    const lb = events.idLabel(b);
+    expect(la).not.toBe(lb);
+    for (const [id, label] of [
+      [a, la],
+      [b, lb],
+    ]) {
+      expect(label).toHaveLength(16);
+      expect(label.startsWith(id.slice(0, 8))).toBe(true);
+      expect(label.endsWith(id.slice(-7))).toBe(true);
+      expect(label).toContain("…");
+    }
+  });
+
+  test("case is kept", () => {
+    expect(events.idLabel("Run_AbC")).toBe("Run_AbC");
+    const id = "Grun_AbCdEfGhIjKlMnOpQrStUv";
+    const label = events.idLabel(id);
+    const [head, tail] = label.split("…");
+    expect(label).toHaveLength(16);
+    expect(id.startsWith(head)).toBe(true);
+    expect(id.endsWith(tail)).toBe(true);
+    expect(head + tail).toBe(id.slice(0, 8) + id.slice(-7));
+  });
+
+  test("empty, non-string and operator-set ids", () => {
+    expect(events.idLabel(null)).toBe("");
+    expect(events.idLabel(undefined)).toBe("");
+    expect(events.idLabel("")).toBe("");
+    expect(events.idLabel(42)).toBe("42");
+    expect(events.idLabel("nightly 11/3")).toBe("nightly 11/3");
+    expect(events.idLabel("abcdefghij", 2)).toBe(events.idLabel("abcdefghij", 5));
+    expect(events.idLabel("abcdefghij", 2)).toBe("ab…ij");
+  });
+});
+
+describe("ids are opaque: idFileStem", () => {
+  test("canonical, grun_ and run_<hex> ids come back unchanged", () => {
+    const ids = [canon(crock(10, 2), crock(16, 4)), "grun_0123456789abcdef", "run_fedcba9876543210"];
+    for (const id of ids) expect(events.idFileStem(id, "fb")).toBe(id);
+  });
+
+  test("characters outside the file-safe set become _, leading dots go", () => {
+    expect(events.idFileStem("a/b\\c:d?*", "fb")).toBe("a_b_c_d__");
+    expect(events.idFileStem("../etc", "fb")).toBe("_etc");
+  });
+
+  test("nothing left gives the fallback", () => {
+    expect(events.idFileStem("", "fb")).toBe("fb");
+    expect(events.idFileStem(null, "fb")).toBe("fb");
+    expect(events.idFileStem("...", "fb")).toBe("fb");
+  });
+
+  test("the stem is capped at 100 characters", () => {
+    expect(events.idFileStem("x".repeat(300), "fb")).toHaveLength(100);
+  });
+});
+
+describe("ids are opaque: the views", () => {
+  const ID_SLICE = /\b\w*(?:Id|ID)\b\)?\.slice\(/g;
+  const hits = (src: string) => (src.match(ID_SLICE) ?? []).length;
+  const read = (rel: string) => readFileSync(join(REPO, rel), "utf8");
+
+  test("the guard sees an id cut to a prefix", () => {
+    const planted = ["run.runId.slice(0, 12)", "String(ev.childRunId).slice(0, 8)"].join("\n");
+    expect(hits(planted)).toBe(2);
+  });
+
+  test("no view or shared module cuts an id with slice()", () => {
+    const files: string[] = [];
+    for (const d of readdirSync(REPO, { withFileTypes: true })) {
+      if (!d.isDirectory() || d.name.startsWith(".") || d.name === "node_modules") continue;
+      const names = readdirSync(join(REPO, d.name));
+      if (d.name === "_shared") {
+        for (const n of names) if (n.endsWith(".js")) files.push(join(d.name, n));
+      } else if (names.includes("app.js")) files.push(join(d.name, "app.js"));
+    }
+    expect(files).toContain(join("research", "app.js"));
+    expect(files).toContain(join("_shared", "events.js"));
+    const offenders = files.filter((f) => hits(read(f)) > 0);
+    expect(offenders).toEqual([]);
+  });
+
+  test("research and graph shorten and name ids through the shared helpers", () => {
+    const research = read("research/app.js");
+    expect(research).toContain('class: "badge id"');
+    expect(research).toContain("events.idLabel(run.runId");
+    expect(research).toContain("events.idFileStem(run.runId");
+    expect(read("graph/app.js")).toContain("events.idLabel(id, 15)");
+  });
+
+  test("an id badge keeps the id's case", () => {
+    const block = read("_shared/ui.css").match(/\.badge\.id\s*\{[^}]*\}/);
+    expect(block).not.toBeNull();
+    expect(block?.[0]).toContain("text-transform: none");
   });
 });

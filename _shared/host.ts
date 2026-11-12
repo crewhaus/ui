@@ -400,7 +400,8 @@ const RUNIDLESS_EVENT_KINDS = new Set([
   "a2a_message",
 ]);
 
-function looksLikeEvent(o: unknown): o is Record<string, unknown> {
+/** A run id is opaque: any string `runId` marks an event, whatever its form. */
+export function looksLikeEvent(o: unknown): o is Record<string, unknown> {
   if (!o || typeof o !== "object") return false;
   const r = o as Record<string, unknown>;
   if (typeof r.kind !== "string") return false;
@@ -436,7 +437,7 @@ function scanBalanced(s: string, start: number): number {
 type Drained = { text: string; events: Record<string, unknown>[]; rest: string };
 
 /** Pull complete events + flushed text out of an accumulated buffer. */
-function drain(buf: string): Drained {
+export function drain(buf: string): Drained {
   let text = "";
   const events: Record<string, unknown>[] = [];
   let i = 0;
