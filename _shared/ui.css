@@ -1075,6 +1075,10 @@ kbd {
   background: var(--panel-3);
   white-space: nowrap;
 }
+.badge.id {
+  text-transform: none;
+  letter-spacing: 0;
+}
 .badge.ok {
   color: var(--accent);
   background: var(--accent-ghost);

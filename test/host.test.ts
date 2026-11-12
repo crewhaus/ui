@@ -10,7 +10,9 @@ import { join } from "node:path";
 import {
   crewhausResponse,
   deriveSpecName,
+  drain,
   exitStatusExtra,
+  looksLikeEvent,
   MemoryWatcher,
   memorySurfaceOf,
   pushStderrTail,
@@ -571,5 +573,45 @@ describe("a managed daemon's signing secret", () => {
     expect(h.seen()).toBe("<unset>");
     expect(h.secrets()).toEqual([]);
     expect(h.sup.gatewaySecretMessage()).toBeNull();
+  });
+});
+
+// ── Run ids are opaque ───────────────────────────────────────────────────────
+
+describe("a run id of any form marks a trace event", () => {
+  const CROCKFORD = "0123456789abcdefghjkmnpqrstvwxyz";
+  const crock = (n: number, seed: number) =>
+    Array.from({ length: n }, (_, i) => CROCKFORD[(seed * 11 + i * 5) % 32]).join("");
+  const canon = (time: string, rand: string) => `run_${time}${rand}`;
+  const CANONICAL = canon(crock(10, 1), crock(16, 2));
+
+  test("the canonical id is well formed", () => {
+    expect(CANONICAL).toMatch(/^run_[0-9a-hjkmnp-tv-z]{26}$/);
+  });
+
+  test("looksLikeEvent accepts every id form and decides by type", () => {
+    const ids = [
+      CANONICAL,
+      "run_0123456789abcdef",
+      "run_0a1b2c3d",
+      "grun_fedcba9876543210",
+      "nightly 2026/11 #3",
+    ];
+    for (const runId of ids) expect(looksLikeEvent({ kind: "turn_start", runId })).toBe(true);
+    expect(looksLikeEvent({ kind: "turn_start", runId: 42 })).toBe(false);
+  });
+
+  test("drain holds an event cut inside its run id until the rest arrives", () => {
+    const line = JSON.stringify({ runId: CANONICAL, kind: "turn_start" });
+    const whole = `some prose ${line}`;
+    const cut = whole.indexOf(CANONICAL) + 10;
+    const first = drain(whole.slice(0, cut));
+    expect(first.text).toBe("some prose ");
+    expect(first.events).toEqual([]);
+    expect(first.rest).toBe(whole.slice("some prose ".length, cut));
+    const second = drain(first.rest + whole.slice(cut));
+    expect(second.events).toHaveLength(1);
+    expect(second.events[0]?.runId).toBe(CANONICAL);
+    expect(second.text).toBe("");
   });
 });

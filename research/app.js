@@ -324,7 +324,7 @@
         ui.goalEcho.appendChild(el("span", { class: "geicon" }, icon("search", 13)));
         ui.goalEcho.appendChild(el("span", { class: "getext", text: run.goal || "—" }));
         if (run.runId) {
-          ui.goalEcho.appendChild(el("span", { class: "badge", text: run.runId.slice(0, 12) }));
+          ui.goalEcho.appendChild(el("span", { class: "badge id", text: events.idLabel(run.runId, 20), title: String(run.runId) }));
         }
       }
 
@@ -678,7 +678,7 @@
       function downloadReport() {
         const src = ui._reportMarkdown || assembleReport();
         const blob = new Blob([src], { type: "text/markdown" });
-        const a = el("a", { href: URL.createObjectURL(blob), download: (run.runId || "research-report") + ".md" });
+        const a = el("a", { href: URL.createObjectURL(blob), download: events.idFileStem(run.runId, "research-report") + ".md" });
         document.body.appendChild(a); a.click();
         setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 0);
       }

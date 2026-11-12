@@ -367,8 +367,7 @@
       }
 
       function short(id) {
-        const s = String(id || "");
-        return s.length > 14 ? s.slice(0, 14) + "…" : s;
+        return events.idLabel(id, 15);
       }
 
       function feedAppend(node) {

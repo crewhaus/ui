@@ -11,7 +11,8 @@
                          card(opts), failureCard(ev), stderrTailCard(lines),
                          FEED_SKIP:Set,
                          spendByRole(stats), spendByProfile(stats),
-                         spendTitle(stats) }
+                         spendTitle(stats),
+                         idLabel(id, max), idFileStem(id, fallback) }
 
    v0.6.0 adds model attribution: the run's spend is accumulated per ROLE
    (primary / draft / judge / escalation / guide / …) and per `models:` PROFILE
@@ -687,6 +688,37 @@
     return s;
   }
 
+  // ── Ids are opaque ───────────────────────────────────────────────────────
+  // A run id (or any other id) can be any string: `run_` + 26 characters,
+  // `run_` + hex, `grun_` + hex, or whatever an operator set. Views never read
+  // meaning from its length, prefix or case; they shorten it here, one way.
+
+  /** A display label for an id: unchanged when it fits in `max` characters,
+   *  otherwise its two ends joined by `…`, exactly `max` characters long. The
+   *  head tells formats apart and the tail is where ids differ, so two ids
+   *  minted in the same second keep different labels. Never parses, validates
+   *  or changes case. */
+  function idLabel(id, max = 16) {
+    if (id === null || id === undefined || id === "") return "";
+    const s = String(id);
+    const m = Math.max(5, Number(max) || 0);
+    if (s.length <= m) return s;
+    const head = Math.ceil((m - 1) / 2);
+    const tail = Math.floor((m - 1) / 2);
+    return s.slice(0, head) + "…" + s.slice(-tail);
+  }
+
+  /** A file-name stem for an id: every character outside `[A-Za-z0-9._-]`
+   *  becomes `_`, leading dots are dropped, and the result is capped at 100
+   *  characters. Returns `fallback` when nothing is left. */
+  function idFileStem(id, fallback) {
+    const stem = String(id ?? "")
+      .replace(/[^A-Za-z0-9._-]/g, "_")
+      .replace(/^\.+/, "")
+      .slice(0, 100);
+    return stem || fallback;
+  }
+
   window.CH.events = {
     render,
     accrue,
@@ -701,5 +733,8 @@
     spendByProfile,
     spendTitle,
     AUXILIARY_ROLES,
+    // Ids are opaque (pure; unit-tested in test/events.test.ts).
+    idLabel,
+    idFileStem,
   };
 })();
