@@ -1803,11 +1803,28 @@ async function runWorker(
     req.method === "GET" || req.method === "HEAD" ? undefined : await req.arrayBuffer();
   const forwarded = new Request(`http://worker.local/${pathAfter}${url.search}`, {
     method: req.method,
-    headers: withoutKey(req.headers),
+    headers: workerHeaders(req.headers, env),
     body,
   });
   const ctx = { waitUntil() {}, passThroughOnException() {} };
   return handler.fetch(forwarded, env, ctx);
+}
+
+/**
+ * The headers the host hands the worker: the browser's, without the UI key,
+ * and with the worker's own `CHAT_TOKEN` (from the env it is given, so
+ * `.dev.vars` wins) as `Authorization: Bearer <token>`. A worker answers
+ * `POST /chat` only with that bearer. The host owns the header: a browser's
+ * `Authorization` is never forwarded, and the token never reaches the page.
+ * With no `CHAT_TOKEN` set, no bearer is sent, and the worker says so itself
+ * (503 `NO_CHAT_TOKEN`).
+ */
+export function workerHeaders(headers: Headers, env: Record<string, string | undefined>): Headers {
+  const out = withoutKey(headers);
+  out.delete("authorization");
+  const token = typeof env.CHAT_TOKEN === "string" ? env.CHAT_TOKEN.trim() : "";
+  if (token !== "") out.set("authorization", `Bearer ${token}`);
+  return out;
 }
 
 // -- .crewhaus/ memory bridge (Phase 1) ---------------------------------------

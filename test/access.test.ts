@@ -26,6 +26,7 @@ import {
   type ServeHandle,
   type ServeOptions,
   withoutKey,
+  workerHeaders,
   WS_KEY_PROTOCOL_PREFIX,
   WS_PROTOCOL,
   wsOriginAllowed,
@@ -778,6 +779,142 @@ describe("the host keeps the key out of what it hands the worker", () => {
     const r = await get(h, "/worker/echo", opKey);
     expect(r.status).toBe(200);
     expect(JSON.parse(r.body)).toEqual({ sawHeader: false, envHasKey: false, procHasKey: false });
+  });
+});
+
+// ── The worker's CHAT_TOKEN bearer ───────────────────────────────────────────
+
+describe("workerHeaders", () => {
+  const chatToken = () => `tok-${randomBytes(16).toString("hex")}`;
+
+  test("sends the worker's CHAT_TOKEN as the bearer, without the UI key", () => {
+    const token = chatToken();
+    const out = workerHeaders(
+      new Headers({ [KEY_HEADER]: key43(), "content-type": "application/json" }),
+      { CHAT_TOKEN: token },
+    );
+    expect(out.get("authorization")).toBe(`Bearer ${token}`);
+    expect(out.has(KEY_HEADER)).toBe(false);
+    expect(out.get("content-type")).toBe("application/json");
+  });
+
+  test("replaces an Authorization header the page sent", () => {
+    const token = chatToken();
+    const out = workerHeaders(new Headers({ authorization: "Bearer from-the-page" }), {
+      CHAT_TOKEN: token,
+    });
+    expect(out.get("authorization")).toBe(`Bearer ${token}`);
+  });
+
+  test("trims the token, as the worker does", () => {
+    const token = chatToken();
+    expect(workerHeaders(new Headers(), { CHAT_TOKEN: `  ${token}\n` }).get("authorization")).toBe(
+      `Bearer ${token}`,
+    );
+  });
+
+  test("with no CHAT_TOKEN, or an empty one, sends no Authorization at all", () => {
+    for (const env of [{}, { CHAT_TOKEN: "" }, { CHAT_TOKEN: "   " }]) {
+      const out = workerHeaders(new Headers({ authorization: "Bearer from-the-page" }), env);
+      expect(out.has("authorization")).toBe(false);
+    }
+  });
+});
+
+describe("the host sends the worker's CHAT_TOKEN on what it forwards", () => {
+  let h: ServeHandle;
+  let key: string;
+  let harnessDir: string;
+  let savedToken: string | undefined;
+
+  beforeAll(() => {
+    savedToken = process.env.CHAT_TOKEN;
+    Reflect.deleteProperty(process.env, "CHAT_TOKEN");
+    const root = tempRoot();
+    writeShape(
+      join(root, "ui"),
+      shapeConfig({ shape: "cf-worker-cli", runClass: "cf-worker", entry: ["worker.js"], input: "none" }),
+    );
+    writeShared(join(root, "_shared"));
+    harnessDir = join(root, "harness");
+    mkdirSync(join(harnessDir, "node_modules"), { recursive: true });
+    // A stand-in for an emitted worker's front door: /health answers without
+    // a token; /chat answers 503 NO_CHAT_TOKEN with no token set, 401 to a
+    // wrong or missing bearer, and otherwise echoes what reached it.
+    writeFileSync(
+      join(harnessDir, "worker.js"),
+      [
+        "export default {",
+        "  async fetch(req, env) {",
+        "    const url = new URL(req.url);",
+        '    if (req.method === "GET" && url.pathname === "/health") return Response.json({ ok: true });',
+        '    const expected = typeof env.CHAT_TOKEN === "string" ? env.CHAT_TOKEN.trim() : "";',
+        '    if (expected === "") return Response.json({ error: { code: "NO_CHAT_TOKEN" } }, { status: 503 });',
+        '    if (req.headers.get("authorization") !== `Bearer ${expected}`)',
+        '      return Response.json({ error: { code: "UNAUTHORIZED" } }, { status: 401 });',
+        "    return Response.json({ path: url.pathname, body: await req.text() });",
+        "  },",
+        "};",
+        "",
+      ].join("\n"),
+    );
+    h = startQuiet({ uiDir: join(root, "ui"), harnessDir, sharedDir: join(root, "_shared"), port: 0 });
+    key = keyOf(h);
+  });
+
+  afterAll(async () => {
+    if (savedToken === undefined) Reflect.deleteProperty(process.env, "CHAT_TOKEN");
+    else process.env.CHAT_TOKEN = savedToken;
+    await h?.stop();
+  });
+
+  async function chat(pageAuth?: string): Promise<{ status: number; json: Rec }> {
+    const headers = new Headers({ [KEY_HEADER]: key, "content-type": "application/json" });
+    if (pageAuth !== undefined) headers.set("authorization", pageAuth);
+    const res = await fetch(`http://127.0.0.1:${h.port}/worker/chat`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ messages: [{ role: "user", content: "hi" }] }),
+    });
+    return { status: res.status, json: (await res.json()) as Rec };
+  }
+
+  test("POST /worker/chat reaches the worker with the bearer from .dev.vars", async () => {
+    writeFileSync(join(harnessDir, ".dev.vars"), `CHAT_TOKEN=tok-${randomBytes(16).toString("hex")}\n`);
+    const r = await chat();
+    expect(r.status).toBe(200);
+    expect(r.json).toEqual({
+      path: "/chat",
+      body: JSON.stringify({ messages: [{ role: "user", content: "hi" }] }),
+    });
+  });
+
+  test("a bearer the page sends is replaced by the worker's own", async () => {
+    writeFileSync(join(harnessDir, ".dev.vars"), `CHAT_TOKEN=tok-${randomBytes(16).toString("hex")}\n`);
+    expect((await chat("Bearer from-the-page")).status).toBe(200);
+  });
+
+  test(".dev.vars wins over an exported CHAT_TOKEN", async () => {
+    writeFileSync(join(harnessDir, ".dev.vars"), `CHAT_TOKEN=tok-${randomBytes(16).toString("hex")}\n`);
+    process.env.CHAT_TOKEN = `tok-${randomBytes(16).toString("hex")}`;
+    try {
+      expect((await chat()).status).toBe(200);
+    } finally {
+      Reflect.deleteProperty(process.env, "CHAT_TOKEN");
+    }
+  });
+
+  test("with no CHAT_TOKEN set, the worker's own 503 NO_CHAT_TOKEN reaches the page", async () => {
+    writeFileSync(join(harnessDir, ".dev.vars"), "CHAT_TOKEN=\n");
+    const r = await chat("Bearer from-the-page");
+    expect(r.status).toBe(503);
+    expect(r.json).toEqual({ error: { code: "NO_CHAT_TOKEN" } });
+  });
+
+  test("GET /worker/health answers {ok:true}", async () => {
+    const r = await get(h, "/worker/health", key);
+    expect(r.status).toBe(200);
+    expect(JSON.parse(r.body)).toEqual({ ok: true });
   });
 });
 

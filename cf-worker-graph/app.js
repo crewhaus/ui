@@ -264,7 +264,7 @@
             el("div", { class: "probe-row" }, [healthDot, healthTxt]),
             el("div", { class: "endpoint-list" }, [
               endpointRow("POST", "/worker/chat", "streaming graph run"),
-              endpointRow("GET", "/worker/health", "liveness + harness name"),
+              endpointRow("GET", "/worker/health", "liveness"),
             ]),
           ]),
         ]);
@@ -501,7 +501,7 @@
         }
       }
 
-      // ── Health probe: GET /worker/health -> { ok, harness } ─────────────
+      // ── Health probe: GET /worker/health -> { ok: true } ──────────────
       function setHealth(state, text) {
         if (!healthDot) return;
         healthDot.dataset.state = state;
@@ -518,7 +518,7 @@
             return;
           }
           const j = await r.json().catch(() => ({}));
-          if (j && j.ok) setHealth("up", `ok · ${j.harness || "worker"} · ${dt}ms`);
+          if (j && j.ok) setHealth("up", `ok · ${dt}ms`);
           else setHealth("down", `unexpected response · ${dt}ms`);
         } catch (e) {
           setHealth("down", `unreachable: ${e && e.message ? e.message : "error"}`);

@@ -157,7 +157,10 @@ The host loads `.env` in increasing precedence: **repo-root → `<shape>/` →
 `<shape>/harness/`**, and an exported shell variable overrides them all. So a
 single `ANTHROPIC_API_KEY` in the root `.env` covers every shape, and a
 `<shape>/harness/.env` can override it per shape. cf-worker shapes read
-`<shape>/harness/.dev.vars` (the same file `wrangler dev` uses).
+`<shape>/harness/.dev.vars` (the same file `wrangler dev` uses). A worker answers
+`POST /chat` only with its `CHAT_TOKEN` as a bearer token: set `CHAT_TOKEN` there
+too, and the host sends it as `Authorization: Bearer <token>` on every request it
+forwards to the worker, so the page never sees it.
 
 `.gitignore` keeps real `.env` / `.dev.vars` files out of git; only the
 `.example` templates are tracked.

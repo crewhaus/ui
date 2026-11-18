@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The cf-worker consoles drive a crewhaus 0.8.3 worker.** A 0.8.3 worker
+  answers `POST /chat` only with its `CHAT_TOKEN` as a bearer token. The host
+  sends the worker's `CHAT_TOKEN` (from `harness/.dev.vars`, or the `.env`
+  chain) as `Authorization: Bearer <token>` on every request it forwards to
+  `worker.js`, and drops any `Authorization` header the page sends, so the
+  token never reaches the browser. Each `cf-worker-*/harness/.dev.vars.example`
+  carries a `CHAT_TOKEN=` line. The health probe reads the worker's
+  `{"ok":true}` and shows `ok · <latency>`. Upgrade: compile with crewhaus
+  0.8.3, add `CHAT_TOKEN=<a long random value>` to `harness/.dev.vars`, and
+  set the same value with `wrangler secret put CHAT_TOKEN` when you deploy.
+
 - **The hybrid run is legible.** factory 0.6.0 publishes two new trace kinds,
   and the feed renders both: `model_stage` (a stage transition of the rungs and
   side calls that branch a turn — `cascade · escalate`, `model_directed ·
