@@ -17,10 +17,13 @@ The three files emitted by the compiler:
 
 Plus one secret file you create yourself:
 
-- **`.dev.vars`** — a single line `ANTHROPIC_API_KEY=sk-ant-...`. Every node
-  POSTs the Anthropic Messages API with this key. It is git-ignored and never
-  deployed; in production you set the same key with
-  `wrangler secret put ANTHROPIC_API_KEY`.
+- **`.dev.vars`** — two lines, `ANTHROPIC_API_KEY=sk-ant-...` and
+  `CHAT_TOKEN=<a long random value>`. Every node POSTs the Anthropic Messages
+  API with the key, and the worker answers `POST /chat` only with `CHAT_TOKEN`
+  as its bearer token; the host sends it on every request it forwards, so the
+  page never sees it. The file is git-ignored and never deployed; in
+  production you set both with `wrangler secret put ANTHROPIC_API_KEY` and
+  `wrangler secret put CHAT_TOKEN`.
 
 ## How to produce it
 
@@ -30,6 +33,7 @@ Plus one secret file you create yourself:
 ```
 cp build/worker.js build/wrangler.toml build/package.json ui/cf-worker-graph/harness/
 printf 'ANTHROPIC_API_KEY=%s\n' "$ANTHROPIC_API_KEY" > ui/cf-worker-graph/harness/.dev.vars
+printf 'CHAT_TOKEN=%s\n' "$(openssl rand -base64 32)" >> ui/cf-worker-graph/harness/.dev.vars
 ```
 
 ## How to run
@@ -55,7 +59,7 @@ Request Console and the node pipeline are live the moment the page loads.
   state passed to the next node.
 - The **final** node streams its answer token by token as `text` events, then a
   `done` `{ text, stopReason }` (or `error` `{ message }`) event.
-- `GET /worker/health` returns `{ ok, harness }` and powers the live endpoint probe.
+- `GET /worker/health` returns `{"ok":true}` and powers the live endpoint probe.
 
 ## Constraints (M2)
 
@@ -63,10 +67,11 @@ This target is **linear, non-HITL, Anthropic-only, tools-free**. The compiler
 rejects branching (a node with >1 outgoing edge), cycles, unreachable nodes,
 HITL nodes, tools, and non-`claude-*` models — use the local `graph` target for
 any of those. If a request 500s with `NO_KEY`, your `.dev.vars` is missing or
-unreadable.
+unreadable. If it answers 503 `NO_CHAT_TOKEN`, add a `CHAT_TOKEN` line to
+`.dev.vars`.
 
 ---
 
-**Secrets:** copy `.dev.vars.example` → `.dev.vars` in this folder and set `ANTHROPIC_API_KEY`
+**Secrets:** copy `.dev.vars.example` → `.dev.vars` in this folder and set `ANTHROPIC_API_KEY` and `CHAT_TOKEN`
 (Cloudflare’s native local-secrets format — the same file `wrangler dev` reads). It is
 gitignored; the host loads it for the worker.
